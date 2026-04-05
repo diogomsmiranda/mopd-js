@@ -9,14 +9,14 @@
 
 ## Phase 1: Minimal Working Trainer
 
-- [ ] Create `trl/experimental/multi_teacher_gkd/__init__.py`
-- [ ] Create `trl/experimental/multi_teacher_gkd/multi_teacher_gkd_config.py`
-- [ ] Add `MultiTeacherGKDConfig(GKDConfig)`
-- [ ] Add config fields:
-  - [ ] `teacher_model_names_or_paths`
-  - [ ] `teacher_weights`
-  - [ ] `teacher_aggregation`
-- [ ] Add config validation in `__post_init__`
+- [x] Create `trl/experimental/multi_teacher_gkd/__init__.py`
+- [x] Create `trl/experimental/multi_teacher_gkd/multi_teacher_gkd_config.py`
+- [x] Add `MultiTeacherGKDConfig(GKDConfig)`
+- [x] Add config fields:
+  - [x] `teacher_model_names_or_paths`
+  - [x] `teacher_weights`
+  - [x] `teacher_aggregation`
+- [x] Add config validation in `__post_init__`
 - [ ] Create `trl/experimental/multi_teacher_gkd/multi_teacher_gkd_trainer.py`
 - [ ] Copy/adapt `GKDTrainer` into `MultiTeacherGKDTrainer`
 - [ ] Implement `_load_teacher_models(...)`

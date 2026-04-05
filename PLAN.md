@@ -1,5 +1,12 @@
 # On-Policy Multi-Teacher Implementation Plan
 
+## Progress
+
+- [x] Phase 1 point 1: create `trl/experimental/multi_teacher_gkd/__init__.py`
+- [x] Phase 1 point 2: create `trl/experimental/multi_teacher_gkd/multi_teacher_gkd_config.py`
+- [ ] Phase 1 point 3: create `trl/experimental/multi_teacher_gkd/multi_teacher_gkd_trainer.py`
+- [ ] Phase 1 point 4: add `tests/experimental/test_multi_teacher_gkd_trainer.py`
+
 ## Goal
 
 Add an experimental trainer for on-policy multi-teacher distillation inside TRL, reusing the existing on-policy GKD pattern and extending it to support multiple frozen teacher LMs with token-level aggregation.
