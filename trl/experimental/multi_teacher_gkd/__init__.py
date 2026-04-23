@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .multi_teacher_gkd_config import MultiTeacherGKDConfig
+from .multi_teacher_gkd_trainer import MultiTeacherGKDTrainer
 
 
-__all__ = ["MultiTeacherGKDConfig"]
+__all__ = ["MultiTeacherGKDConfig", "MultiTeacherGKDTrainer"]

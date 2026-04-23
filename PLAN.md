@@ -4,7 +4,7 @@
 
 - [x] Phase 1 point 1: create `trl/experimental/multi_teacher_gkd/__init__.py`
 - [x] Phase 1 point 2: create `trl/experimental/multi_teacher_gkd/multi_teacher_gkd_config.py`
-- [ ] Phase 1 point 3: create `trl/experimental/multi_teacher_gkd/multi_teacher_gkd_trainer.py`
+- [x] Phase 1 point 3: create `trl/experimental/multi_teacher_gkd/multi_teacher_gkd_trainer.py`
 - [ ] Phase 1 point 4: add `tests/experimental/test_multi_teacher_gkd_trainer.py`
 
 ## Goal
@@ -29,8 +29,9 @@ Target the specialized-track setup first:
 - student: one causal LM
 - teachers: multiple causal LMs
 - assumption: shared tokenizer / same token space
-- objective: fused-teacher JSD on student rollouts
+- objective: fused-teacher JSD on student rollouts or fused-teacher rollouts
 - aggregation: uniform or static weighted average over teacher probabilities
+- generation: if `seq_kd` is used, generation must already come from the fused teacher policy, not from a single teacher shortcut
 
 Defer to later phases:
 
@@ -134,15 +135,22 @@ Methods to include:
 - `generate_on_policy_outputs(...)`
   - copy from `trl/experimental/gkd/gkd_trainer.py:394`
 
+- `_generate_from_fused_teachers(...)`
+  - generate tokens autoregressively from the fused teacher policy
+  - compute each teacher next-token distribution at every decoding step
+  - aggregate them with static weights in probability space
+  - sample the next token from the fused distribution
+
 - `training_step(...)`
-  - copy from `trl/experimental/gkd/gkd_trainer.py:416`
-  - keep on-policy rollout behavior unchanged for V1
+  - keep the student rollout branch from `trl/experimental/gkd/gkd_trainer.py:416`
+  - if `seq_kd` is enabled, use fused-teacher generation instead of `teacher_models[0]`
 
 Implementation detail for V1:
 - aggregate teachers in probability space, not logit space
 - use:
   - `teacher_log_probs_k = log_softmax(teacher_logits_k / temperature)`
   - `ensemble_log_probs = logsumexp(log(w_k) + teacher_log_probs_k, dim=teachers)`
+- reuse the same probability-space fusion rule during both loss computation and fused-teacher decoding
 
 Do not add in V1:
 - custom token alignment helpers
@@ -255,11 +263,13 @@ Behavior:
 - shared tokenizer only
 - uniform or static weighted teacher fusion
 - fused-teacher JSD on student rollouts
+- fused-teacher decoding for `seq_kd` rollouts
 
 Success criteria:
 - smoke test passes
 - single-teacher parity passes
 - two-teacher aggregation passes
+- `seq_kd` uses fused-teacher generation rather than a single teacher shortcut
 
 ### Phase 2: Thesis-Specific Diagnostics
 
@@ -290,9 +300,33 @@ Add trainer methods:
 
 This is where the thesis-specific adaptive routing starts.
 
-### Phase 4: Heterogeneous Teacher Support
+### Phase 4: Multi-Consensus Loss
 
-Only do this after Phase 1-3 are stable.
+Only do this after Phase 1 static fusion and Phase 3 adaptive routing are stable.
+
+Goal:
+- add a Multi-Consensus objective as a second multi-teacher loss family, separate from fused-teacher JSD
+
+Likely changes:
+- extend `multi_teacher_gkd_config.py` with a loss/objective selector
+- add a new consensus loss path in `multi_teacher_gkd_trainer.py`
+- compare fused-teacher supervision against consensus-style supervision in tests and experiments
+
+Suggested work:
+- add `loss_type = "fused_jsd" | "multi_consensus"`
+- implement an N-way consensus objective over teacher/student distributions
+- add ablations comparing:
+  - static fused teacher
+  - adaptive teacher aggregation
+  - Multi-Consensus loss
+
+Why it comes after adaptive routing:
+- adaptive routing is the smaller extension of the current Phase 1 implementation
+- Multi-Consensus is an objective-level change and is easier to evaluate once the fused baseline is trusted
+
+### Phase 5: Heterogeneous Teacher Support
+
+Only do this after Phase 1-4 are stable.
 
 Likely changes:
 - extend config with teacher processing/alignment fields
@@ -303,6 +337,68 @@ Reference only:
 - `trl/experimental/gold/gold_config.py`
 
 This should not be part of the MVP.
+
+## Optimisations
+
+These optimisations are inspired by `distilling-100b-models-40x-faster-with-trl.pdf` and should be treated as
+performance work after the Phase 1 trainer is correct and tested.
+
+### 1. Cached Fused-Teacher Decoding
+
+Current bottleneck:
+- `_generate_from_fused_teachers(...)` currently recomputes each teacher over the full prefix at every decoding step.
+
+Planned optimisation:
+- keep `past_key_values` for each teacher during fused generation
+- feed only the newly generated token after the first step
+- preserve the same fused probability-space decoding rule
+
+Why it matters:
+- this is the biggest Phase 1 runtime bottleneck
+- it should reduce fused-teacher `seq_kd` rollout cost substantially
+
+### 2. Generation Buffer For Student Rollouts
+
+Current bottleneck:
+- student rollout generation still follows the usual per-step training flow and does not yet exploit a buffer across
+  gradient accumulation steps.
+
+Planned optimisation:
+- accumulate prompts across a generation window
+- batch rollout generation while keeping model weights fixed before the optimizer step
+- feed buffered completions back into the sequential train loop
+
+Why it matters:
+- this is the main throughput improvement highlighted in the TRL distillation paper
+- it improves generation efficiency without breaking the on-policy setting
+
+### 3. Optional Top-k Distillation Approximation
+
+Current bottleneck:
+- the current fused multi-teacher implementation uses full-vocabulary distributions for aggregation and JSD.
+
+Planned optimisation:
+- support an optional top-k approximation for teacher and/or student log-prob comparisons
+- preserve the exact full-vocab path as the correctness baseline
+
+Why it matters:
+- reduces memory and compute cost for long sequences and multiple teachers
+- becomes increasingly valuable as the number of teachers grows
+
+### 4. External Teacher Server
+
+Current bottleneck:
+- all teachers are currently colocated with training.
+
+Planned optimisation:
+- move teacher scoring to an external vLLM-style service when model scale or teacher count makes colocated inference
+  inefficient
+- batch concurrent requests on the server side
+- consider compact/binary payload encoding for returned log-prob data
+
+Why it matters:
+- useful once teacher scale grows beyond the comfortable colocated setup
+- likely more relevant for later thesis phases than for the initial 1.5B shared-tokenizer experiments
 
 ## Recommended Class And Package Names
 
