@@ -31,13 +31,19 @@
 
 ### Tests
 
-- [ ] Create `tests/experimental/test_multi_teacher_gkd_trainer.py`
-- [ ] Add smoke train test
-- [ ] Add invalid teacher weight test
-- [ ] Add single-teacher parity test against `GKDTrainer`
-- [ ] Add identical-teachers equivalence test
-- [ ] Add on-policy generation path test
-- [ ] Add fused-teacher `seq_kd` generation test
+- [x] Create `tests/experimental/test_multi_teacher_gkd_trainer.py`
+- [x] Mirror shared utility tests from `tests/experimental/test_gkd_trainer.py` where behavior should remain identical
+- [x] Add adapted JSD/loss unit tests for `generalized_jsd_loss_from_log_probs(...)`
+- [x] Add smoke train test
+- [x] Add invalid teacher weight test
+- [x] Add single-teacher parity test against `GKDTrainer`
+- [x] Add identical-teachers equivalence test
+- [x] Add on-policy generation path test
+- [x] Add fused-teacher `seq_kd` generation test
+- [x] Add direct `_generate_from_fused_teachers(...)` test
+- [x] Add uniform aggregation test for `_aggregate_teacher_log_probs(...)`
+- [x] Add static-weighted aggregation test for `_aggregate_teacher_log_probs(...)`
+- [x] Use `trl-internal-testing/...` Hub assets for tiny model/dataset coverage rather than local test folders
 
 ### Docs
 
