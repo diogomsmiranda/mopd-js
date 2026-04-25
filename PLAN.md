@@ -166,6 +166,11 @@ Base test to mirror:
 
 Tests to implement:
 
+- structure the test file into three layers:
+  - copied/shared-behavior tests mirrored from `tests/experimental/test_gkd_trainer.py`
+  - parity tests showing the multi-teacher trainer reduces to GKD in the right special cases
+  - new multi-teacher-specific tests for aggregation and fused-teacher generation
+
 - `test_multi_teacher_gkd_train_smoke`
   - tiny dataset
   - tiny student
@@ -190,6 +195,25 @@ Tests to implement:
 - `test_on_policy_generation_path`
   - inherited/copied rollout path still returns valid tensors
   - mirror `tests/experimental/test_gkd_trainer.py:28`
+
+- `test_generate_from_fused_teachers`
+  - directly test `_generate_from_fused_teachers(...)`
+  - check shape, prompt-prefix preservation, labels, and attention mask
+  - prefer deterministic generation settings where possible
+
+- `test_aggregate_teacher_log_probs_uniform`
+  - check uniform probability-space fusion behavior for multiple teachers
+
+- `test_aggregate_teacher_log_probs_static_weighted`
+  - check that static weights bias the fused distribution toward the heavier teacher
+
+- mirror the existing GKD utility tests where behavior should stay identical:
+  - deterministic `generate_on_policy_outputs(...)`
+  - shape/type checks for `generate_on_policy_outputs(...)`
+
+Test data/model strategy:
+- use Hugging Face Hub internal test assets referenced as `trl-internal-testing/...`
+- these are model and dataset repo IDs fetched through `from_pretrained(...)` and `load_dataset(...)`, not local folders inside this repository
 
 ## Existing Files To Update
 
