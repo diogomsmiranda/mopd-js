@@ -118,6 +118,7 @@ class MultiTeacherGKDTrainer(SFTTrainer):
     ):
         if teacher_models is None:
             teacher_models = args.teacher_model_names_or_paths
+        self.teacher_metric_names = self._get_teacher_metric_names(teacher_models)
 
         # Ensure Trainer does not drop non-signature columns used by the collator (e.g., "prompts")
         args.remove_unused_columns = False
@@ -180,6 +181,20 @@ class MultiTeacherGKDTrainer(SFTTrainer):
             and self.model.generation_config.eos_token_id is not None
         ):
             self.generation_config.eos_token_id = self.model.generation_config.eos_token_id
+
+    @staticmethod
+    def _get_teacher_metric_names(teacher_models: list[PreTrainedModel | nn.Module | str]) -> list[str]:
+        teacher_metric_names = []
+        for teacher_idx, teacher_model in enumerate(teacher_models):
+            if isinstance(teacher_model, str):
+                teacher_name = teacher_model
+            elif getattr(teacher_model, "name_or_path", None):
+                teacher_name = teacher_model.name_or_path
+            else:
+                teacher_name = teacher_model.__class__.__name__
+            teacher_name = "".join(char if char.isalnum() or char in ["-", "_", "."] else "_" for char in teacher_name)
+            teacher_metric_names.append(f"{teacher_idx}_{teacher_name}")
+        return teacher_metric_names
 
     def _load_teacher_models(
         self,
@@ -275,7 +290,41 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         # Aggregate the teacher distributions in probability space.
         teacher_log_probs = torch.stack(teacher_log_probs, dim=0)
         teacher_weights = self.teacher_weights.to(device=teacher_log_probs.device, dtype=teacher_log_probs.dtype)
-        return torch.logsumexp(teacher_log_probs + teacher_weights.log().view(-1, 1, 1, 1), dim=0)
+        aggregated_teacher_log_probs = torch.logsumexp(
+            teacher_log_probs + teacher_weights.log().view(-1, 1, 1, 1), dim=0
+        )
+        return teacher_log_probs, aggregated_teacher_log_probs
+
+    def _log_distribution_metrics(self, teacher_log_probs, fused_teacher_log_probs, shifted_labels):
+        mode = "train" if self.model.training else "eval"
+        valid_mask = shifted_labels != -100
+        safe_labels = shifted_labels.masked_fill(~valid_mask, 0)
+
+        def masked_mean(values):
+            return values[valid_mask].mean() if valid_mask.any() else values.new_tensor(0.0)
+
+        for teacher_idx, teacher_log_probs_i in enumerate(teacher_log_probs):
+            teacher_metric_name = self.teacher_metric_names[teacher_idx]
+            teacher_probs_i = teacher_log_probs_i.exp()
+            selected_log_probs = teacher_log_probs_i.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
+            entropy = -(teacher_probs_i * teacher_log_probs_i).sum(dim=-1)
+            confidence = teacher_probs_i.max(dim=-1).values
+
+            self._metrics[mode][f"teachers/{teacher_metric_name}/selected_logprob"].append(
+                masked_mean(selected_log_probs).item()
+            )
+            self._metrics[mode][f"teachers/{teacher_metric_name}/entropy"].append(masked_mean(entropy).item())
+            self._metrics[mode][f"teachers/{teacher_metric_name}/confidence"].append(masked_mean(confidence).item())
+            self._metrics[mode][f"teachers/{teacher_metric_name}/weight"].append(self.teacher_weights[teacher_idx].item())
+
+        fused_teacher_probs = fused_teacher_log_probs.exp()
+        fused_selected_log_probs = fused_teacher_log_probs.gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
+        fused_entropy = -(fused_teacher_probs * fused_teacher_log_probs).sum(dim=-1)
+        fused_confidence = fused_teacher_probs.max(dim=-1).values
+
+        self._metrics[mode]["fused/selected_logprob"].append(masked_mean(fused_selected_log_probs).item())
+        self._metrics[mode]["fused/entropy"].append(masked_mean(fused_entropy).item())
+        self._metrics[mode]["fused/confidence"].append(masked_mean(fused_confidence).item())
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         # compute student output
@@ -288,12 +337,14 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         prompt_lengths = inputs["prompts"].shape[1]
         shifted_student_logits = student_outputs.logits[:, prompt_lengths - 1 : -1, :] / self.temperature
         shifted_student_log_probs = F.log_softmax(shifted_student_logits, dim=-1)
-        aggregated_teacher_log_probs = self._aggregate_teacher_log_probs(
+        teacher_log_probs, aggregated_teacher_log_probs = self._aggregate_teacher_log_probs(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
             prompt_lengths=prompt_lengths,
         )
         shifted_labels = inputs["labels"][:, prompt_lengths:]
+
+        self._log_distribution_metrics(teacher_log_probs, aggregated_teacher_log_probs, shifted_labels)
 
         # compute loss
         loss = self.generalized_jsd_loss_from_log_probs(

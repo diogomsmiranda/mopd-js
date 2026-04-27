@@ -322,6 +322,14 @@ Add:
   - `uniform`
   - `static_weighted`
 
+Status:
+- [x] added per-teacher selected-logprob, entropy, confidence, and weight metrics
+- [x] added fused-teacher selected-logprob, entropy, and confidence metrics
+- [x] added metric assertions to `tests/experimental/test_multi_teacher_gkd_trainer.py`
+- [x] documented metric meanings in `docs/source/multi_teacher_gkd_trainer.md`
+- [x] documented `uniform` vs `static_weighted` ablation guidance
+- [ ] add prompt/completion diagnostics if needed for experiment debugging
+
 ### Phase 3: Adaptive Teacher Aggregation
 
 Extend same files, no new abstraction layer.
