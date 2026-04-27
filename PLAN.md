@@ -5,7 +5,7 @@
 - [x] Phase 1 point 1: create `trl/experimental/multi_teacher_gkd/__init__.py`
 - [x] Phase 1 point 2: create `trl/experimental/multi_teacher_gkd/multi_teacher_gkd_config.py`
 - [x] Phase 1 point 3: create `trl/experimental/multi_teacher_gkd/multi_teacher_gkd_trainer.py`
-- [ ] Phase 1 point 4: add `tests/experimental/test_multi_teacher_gkd_trainer.py`
+- [x] Phase 1 point 4: add `tests/experimental/test_multi_teacher_gkd_trainer.py`
 
 ## Goal
 
@@ -214,6 +214,17 @@ Tests to implement:
 Test data/model strategy:
 - use Hugging Face Hub internal test assets referenced as `trl-internal-testing/...`
 - these are model and dataset repo IDs fetched through `from_pretrained(...)` and `load_dataset(...)`, not local folders inside this repository
+
+Status:
+- [x] created `tests/experimental/test_multi_teacher_gkd_trainer.py`
+- [x] mirrored shared `generate_on_policy_outputs(...)` tests from `tests/experimental/test_gkd_trainer.py`
+- [x] added adapted JSD/log-prob loss unit tests
+- [x] added config validation tests for teacher weights and aggregation mode
+- [x] added trainer smoke test
+- [x] added single-teacher parity against `GKDTrainer`
+- [x] added identical-teacher equivalence tests
+- [x] added fused-teacher `seq_kd` generation tests
+- [x] added uniform and static-weighted aggregation tests
 
 ## Existing Files To Update
 
