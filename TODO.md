@@ -5,7 +5,8 @@
 - Phase 1: Minimal working multi-teacher on-policy trainer
 - Phase 2: Thesis-specific diagnostics and ablations
 - Phase 3: Adaptive token-level teacher aggregation
-- Phase 4: Heterogeneous-teacher support and advanced hybrids
+- Phase 4: Multi-Consensus loss
+- Phase 5: Heterogeneous-teacher support and advanced hybrids
 
 ## Phase 1: Minimal Working Trainer
 
@@ -48,8 +49,8 @@
 ### Docs
 
 - [x] Create `docs/source/multi_teacher_gkd_trainer.md`
-- [ ] Add `MultiTeacherGKDTrainer` to `docs/source/index.md`
-- [ ] Add dataset-format row to `docs/source/dataset_formats.md`
+- [x] Add `MultiTeacherGKDTrainer` to `docs/source/index.md`
+- [x] Add dataset-format row to `docs/source/dataset_formats.md`
 
 ### Optional After MVP
 
@@ -57,11 +58,11 @@
 
 ## Phase 2: Thesis-Specific Diagnostics
 
-- [ ] Add per-teacher metrics and logging
-- [ ] Log fused-teacher entropy / confidence diagnostics
-- [ ] Add `static_weighted` vs `uniform` ablations
-- [ ] Add trainer tests for metric logging
-- [ ] Extend docs with ablation guidance and experiment notes
+- [x] Add per-teacher metrics and logging
+- [x] Log fused-teacher entropy / confidence diagnostics
+- [x] Document `static_weighted` vs `uniform` ablations
+- [x] Add trainer tests for metric logging
+- [x] Extend docs with ablation guidance and experiment notes
 
 ## Phase 3: Adaptive Token-Level Aggregation
 
