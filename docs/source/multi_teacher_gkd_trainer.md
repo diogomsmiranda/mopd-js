@@ -451,7 +451,8 @@ Finally, fusion happens here:
 ```python
 teacher_log_probs = torch.stack(teacher_log_probs, dim=0)
 teacher_weights = self.teacher_weights.to(device=teacher_log_probs.device, dtype=teacher_log_probs.dtype)
-return torch.logsumexp(teacher_log_probs + teacher_weights.log().view(-1, 1, 1, 1), dim=0)
+aggregated_teacher_log_probs = torch.logsumexp(teacher_log_probs + teacher_weights.log().view(-1, 1, 1, 1), dim=0)
+return teacher_log_probs, aggregated_teacher_log_probs
 ```
 
 Meaning:
@@ -460,6 +461,7 @@ Meaning:
 - add log weights
 - apply log-sum-exp over the teacher axis
 - this gives the fused teacher distribution in log-probability space
+- return both the per-teacher log-probs for diagnostics and the fused log-probs for the loss
 
 This is the exact Phase 1 multi-teacher idea: static fusion in probability space.
 
@@ -493,7 +495,7 @@ shifted_student_log_probs = F.log_softmax(shifted_student_logits, dim=-1)
 Then it gets the fused teacher target:
 
 ```python
-aggregated_teacher_log_probs = self._aggregate_teacher_log_probs(
+teacher_log_probs, aggregated_teacher_log_probs = self._aggregate_teacher_log_probs(
     input_ids=inputs["input_ids"],
     attention_mask=inputs["attention_mask"],
     prompt_lengths=prompt_lengths,
@@ -687,6 +689,42 @@ return loss
 
 This hands control back to the normal Trainer flow, which will eventually call `compute_loss(...)`.
 
+## Logged diagnostics
+
+The trainer logs distribution diagnostics through the standard `Trainer` logging path. This means the values appear in
+`trainer.state.log_history` and are also sent to configured integrations such as Weights & Biases when `report_to` is
+set accordingly.
+
+Per-teacher metrics are logged with keys of the form `teachers/{idx}_{teacher_name}/...`. The index follows the order
+of `teacher_model_names_or_paths`, while `teacher_name` is a sanitized version of the teacher model path or class name.
+For example, the first teacher in `teacher_model_names_or_paths=["Qwen/Qwen2.5-Math-1.5B", ...]` would be logged under
+`teachers/0_Qwen_Qwen2.5-Math-1.5B/...`.
+
+- `teachers/{idx}_{teacher_name}/selected_logprob`: the mean log-probability assigned by that teacher to the actual generated or completion tokens.
+- `teachers/{idx}_{teacher_name}/entropy`: the mean entropy of that teacher over the supervised tokens. Higher values indicate a flatter, less certain distribution.
+- `teachers/{idx}_{teacher_name}/confidence`: the mean maximum token probability of that teacher over the supervised tokens. Higher values indicate sharper predictions.
+- `teachers/{idx}_{teacher_name}/weight`: the normalized aggregation weight assigned to that teacher.
+
+Fused-teacher metrics are logged with keys of the form `fused/...`:
+
+- `fused/selected_logprob`: the mean log-probability assigned by the fused teacher distribution to the supervised tokens.
+- `fused/entropy`: the mean entropy of the fused teacher distribution.
+- `fused/confidence`: the mean maximum token probability of the fused teacher distribution.
+
+These diagnostics are useful before introducing adaptive teacher routing. They show whether teachers agree, whether the
+fused target is sharp or noisy, and whether the static weights are producing a meaningful supervision signal.
+
+## Uniform vs static-weighted ablations
+
+The current trainer supports two static aggregation modes:
+
+- `teacher_aggregation="uniform"`: all teachers receive equal weight. This is the Phase 1 baseline and corresponds to a naive ensemble target.
+- `teacher_aggregation="static_weighted"`: teachers receive fixed user-provided weights through `teacher_weights`.
+
+These settings should be treated as ablations. `uniform` answers whether simple multi-teacher fusion helps at all,
+whereas `static_weighted` tests whether prior knowledge about teacher quality or domain relevance improves the fused
+target before adding adaptive token-level routing.
+
 ## End-to-end flow
 
 The complete Phase 1 training logic is:
@@ -705,13 +743,12 @@ The complete Phase 1 training logic is:
 
 ## Important current limitations
 
-This document describes the current code, which still has some intentional Phase 1 limitations:
+This document describes the current code, which still has some intentional limitations:
 
 - only static aggregation is implemented
 - no adaptive token-level routing yet
 - no heterogeneous tokenizer support yet
 - fused-teacher generation currently recomputes each teacher on the full prefix each decoding step
-- there are not yet dedicated tests in `tests/experimental/test_multi_teacher_gkd_trainer.py`
 - `_paper` metadata in the trainer is still incomplete
 
 ## Suggested reading path
