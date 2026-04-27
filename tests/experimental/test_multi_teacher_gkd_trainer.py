@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
 from datasets import load_dataset
-from types import SimpleNamespace
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 from trl.experimental.gkd import GKDConfig, GKDTrainer
@@ -267,6 +268,7 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
             eval_strategy="steps",
             max_steps=2,
             eval_steps=1,
+            logging_steps=1,
             save_steps=1,
             per_device_train_batch_size=2,
             per_device_eval_batch_size=2,
@@ -290,6 +292,18 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         # Check that the training loss is not None
         assert trainer.state.log_history[-1]["train_loss"] is not None
         assert any("eval_loss" in log for log in trainer.state.log_history)
+        teacher_metric_names = trainer.teacher_metric_names
+        assert any(f"teachers/{teacher_metric_names[0]}/selected_logprob" in log for log in trainer.state.log_history)
+        assert any(f"teachers/{teacher_metric_names[0]}/entropy" in log for log in trainer.state.log_history)
+        assert any(f"teachers/{teacher_metric_names[0]}/confidence" in log for log in trainer.state.log_history)
+        assert any(f"teachers/{teacher_metric_names[0]}/weight" in log for log in trainer.state.log_history)
+        assert any(f"teachers/{teacher_metric_names[1]}/selected_logprob" in log for log in trainer.state.log_history)
+        assert any(f"teachers/{teacher_metric_names[1]}/entropy" in log for log in trainer.state.log_history)
+        assert any(f"teachers/{teacher_metric_names[1]}/confidence" in log for log in trainer.state.log_history)
+        assert any(f"teachers/{teacher_metric_names[1]}/weight" in log for log in trainer.state.log_history)
+        assert any("fused/selected_logprob" in log for log in trainer.state.log_history)
+        assert any("fused/entropy" in log for log in trainer.state.log_history)
+        assert any("fused/confidence" in log for log in trainer.state.log_history)
 
         # Check the params have changed
         assert any(
@@ -463,12 +477,12 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
             processing_class=self.tokenizer,
         )
 
-        single_teacher_log_probs = single_teacher_trainer._aggregate_teacher_log_probs(
+        _, single_teacher_log_probs = single_teacher_trainer._aggregate_teacher_log_probs(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
             prompt_lengths=prompt_lengths,
         )
-        identical_teacher_log_probs = identical_teacher_trainer._aggregate_teacher_log_probs(
+        _, identical_teacher_log_probs = identical_teacher_trainer._aggregate_teacher_log_probs(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
             prompt_lengths=prompt_lengths,
@@ -498,7 +512,7 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         trainer.teacher_weights = teacher_weights
         trainer.temperature = 1.0
 
-        aggregated_teacher_log_probs = trainer._aggregate_teacher_log_probs(
+        _, aggregated_teacher_log_probs = trainer._aggregate_teacher_log_probs(
             input_ids=torch.ones(1, 2, dtype=torch.long),
             attention_mask=torch.ones(1, 2, dtype=torch.long),
             prompt_lengths=1,
