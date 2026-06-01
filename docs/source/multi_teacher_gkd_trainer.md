@@ -15,6 +15,13 @@ The goal of this package is to extend TRL's single-teacher GKD setup into a mult
 - the student is trained against that fused target
 - `seq_kd` can generate from a fused teacher policy instead of a single teacher
 
+## Expected dataset type
+
+The trainer supports conversational datasets with a `messages` column and prompt-completion datasets with `prompt` and
+`completion` columns. Raw prompt-completion datasets are tokenized by the trainer using the same prompt plus
+prompt-completion pattern as `SFTTrainer`; the default collator then batches the normalized examples into full
+`input_ids`, supervised `labels`, prompt-only `prompts`, and `prompt_attention_mask` for on-policy generation.
+
 ## File overview
 
 ### `trl/experimental/multi_teacher_gkd/__init__.py`
@@ -81,6 +88,7 @@ What it means:
 
 - a list of teacher checkpoints
 - these are the teachers the trainer will load if teacher models are not passed directly as instantiated model objects
+- this can be `None` when instantiated teacher models are passed through `MultiTeacherGKDTrainer(teacher_models=...)`
 
 #### `teacher_weights`
 
@@ -125,14 +133,16 @@ Code:
 def __post_init__(self):
     super().__post_init__()
 
-    if not self.teacher_model_names_or_paths:
-        raise ValueError("teacher_model_names_or_paths must contain at least one teacher model.")
+    if self.teacher_model_names_or_paths is not None and len(self.teacher_model_names_or_paths) == 0:
+        raise ValueError("teacher_model_names_or_paths must contain at least one teacher model when provided.")
 
     if self.teacher_aggregation not in ["uniform", "static_weighted"]:
         raise ValueError("teacher_aggregation must be one of ['uniform', 'static_weighted'].")
 
     if self.teacher_weights is not None:
-        if len(self.teacher_weights) != len(self.teacher_model_names_or_paths):
+        if self.teacher_model_names_or_paths is not None and len(self.teacher_weights) != len(
+            self.teacher_model_names_or_paths
+        ):
             raise ValueError("teacher_weights must have the same length as teacher_model_names_or_paths.")
         if sum(self.teacher_weights) <= 0:
             raise ValueError("teacher_weights must have a strictly positive sum.")
@@ -140,9 +150,9 @@ def __post_init__(self):
 
 Why it exists:
 
-- ensures at least one teacher exists
+- rejects an explicitly empty teacher checkpoint list
 - prevents unsupported aggregation modes
-- ensures static weights are aligned with the teacher list
+- ensures static weights are aligned with the teacher checkpoint list when checkpoint names are configured
 - ensures the weight vector is meaningful
 
 ## `MultiTeacherGKDTrainer`
@@ -185,12 +195,17 @@ Important early logic:
 ```python
 if teacher_models is None:
     teacher_models = args.teacher_model_names_or_paths
+if teacher_models is None or len(teacher_models) == 0:
+    raise ValueError("teacher_models must contain at least one teacher model.")
+if args.teacher_weights is not None and len(args.teacher_weights) != len(teacher_models):
+    raise ValueError("teacher_weights must have the same length as teacher_models.")
 ```
 
 Meaning:
 
 - teachers can be provided directly to the trainer
 - or they can come from the config
+- the trainer validates the resolved teacher list before initialization continues
 
 Then the constructor sets up the collator path:
 

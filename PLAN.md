@@ -381,6 +381,174 @@ Reference only:
 
 This should not be part of the MVP.
 
+## Experimental Plan
+
+The implementation plan supports a staged thesis evaluation. Experiments should isolate one variable at a time:
+static fusion, on-policy rollouts, sequence-level KD, adaptive aggregation, and multi-consensus objectives.
+
+### Experiment 1: Static Uniform On-Policy Multi-Teacher GKD
+
+Goal:
+- validate the core On-Policy FuseLLM-style baseline
+- test whether student rollouts plus fused-teacher JSD improve over static/off-policy imitation
+
+Setup:
+- student: `Qwen/Qwen2.5-1.5B`
+- teachers:
+  - `Qwen/Qwen2.5-1.5B-Instruct`
+  - `Qwen/Qwen2.5-Math-1.5B`
+  - `Qwen/Qwen2.5-Coder-1.5B`
+- aggregation: `teacher_aggregation="uniform"`
+- objective: fused-teacher JSD
+- `seq_kd=False`
+- sweep `lmbda` over values such as `0.25`, `0.5`, and `0.9`
+
+Primary question:
+- does increasing the student on-policy rollout fraction improve reasoning recovery and generalization?
+
+### Experiment 2: Static Sequence-Level KD Ablation
+
+Goal:
+- isolate the effect of fused-teacher sequence generation
+
+Setup:
+- same Qwen2.5 1.5B student and teachers
+- aggregation: `teacher_aggregation="uniform"`
+- objective: fused-teacher JSD
+- `seq_kd=True`
+- `lmbda=0.0`
+
+Primary question:
+- does training on fused-teacher-generated completions help compared with student-generated on-policy rollouts?
+
+Note:
+- keep this separate from the main on-policy runs because `seq_kd` and `lmbda` control different rollout sources
+- in the current implementation, the `lmbda` branch can overwrite the `seq_kd` branch, so mixed runs should be treated as later ablations
+
+### Experiment 3: Mixed Rollout Ablation
+
+Goal:
+- test whether combining fused-teacher sequence KD with student rollouts improves stability or final quality
+
+Setup:
+- `seq_kd=True`
+- sweep `lmbda`, with emphasis on `0.9` for mostly student rollouts
+- compare against pure `seq_kd=True, lmbda=0.0` and pure on-policy `seq_kd=False, lmbda=0.9`
+
+Primary question:
+- is there value in occasional fused-teacher-generated trajectories once the student is mostly trained on its own rollouts?
+
+Implementation note:
+- this is conceptually valid but currently inefficient because fused-teacher generation runs before potential student-rollout overwrite
+
+### Experiment 4: Static Weighted Aggregation
+
+Goal:
+- test whether fixed prior beliefs about teacher relevance outperform uniform fusion
+
+Setup:
+- same Qwen2.5 specialized teacher team
+- aggregation: `teacher_aggregation="static_weighted"`
+- example weights:
+  - balanced: `[0.333, 0.333, 0.333]`
+  - instruction-heavy: `[0.5, 0.25, 0.25]`
+  - math/code-heavy: `[0.2, 0.4, 0.4]`
+
+Primary question:
+- can simple prior weighting reduce interference between instruction, math, and code teachers before adaptive routing is introduced?
+
+### Experiment 5: Adaptive Aggregation With Fused-Teacher JSD
+
+Goal:
+- implement and evaluate token-level teacher routing while keeping the current fused-teacher objective
+
+Setup:
+- add adaptive `teacher_aggregation` modes:
+  - `"max_margin"`
+  - `"confidence_weighted"`
+- objective: fused-teacher JSD
+- apply dynamic teacher weights per token before constructing the fused teacher distribution
+
+Primary question:
+- does token-level teacher weighting outperform uniform/static fusion by prioritizing the most relevant expert?
+
+Implementation note:
+- adaptive aggregation requires student log-probs in the aggregation path
+- `max_margin` should use the supervised/generated token probability difference between each teacher and the student
+- `confidence_weighted` should weight teachers using selected-token confidence or entropy-derived confidence
+
+### Experiment 6: Multi-Distribution Consensus Objective
+
+Goal:
+- compare pre-fused teacher supervision against holistic N-way consensus supervision
+
+Setup:
+- add objective selector such as `loss_type="fused_jsd"` or `loss_type="multi_consensus"`
+- keep the same teacher aggregation modes
+- compute a shared mixture over student and all teachers: `M = pi_S * Q + sum_k pi_Tk * P_Tk`
+
+Primary question:
+- does the N-way generalized JSD objective improve robustness compared with first collapsing teachers into one fused pseudo-teacher?
+
+Implementation note:
+- this path cannot reuse only the pre-fused teacher distribution
+- it must keep per-teacher log-probs and compute separate KL terms from student and each teacher to the shared mixture
+
+### Experiment 7: Adaptive Sequence-Level KD Generation
+
+Goal:
+- decide whether adaptive teacher aggregation should also control fused-teacher `seq_kd` generation
+
+Setup:
+- treat this as a later ablation after adaptive loss-path routing is stable
+- for `confidence_weighted`, weight teachers by next-token confidence or entropy at each decoding step
+- for `max_margin`, decide between distribution-level student-teacher disagreement and confidence-margin routing
+
+Primary question:
+- should adaptive aggregation decide only how to supervise tokens, or also which teacher policy writes synthetic trajectories?
+
+Open decision:
+- `max_margin` generation is less direct because the next token is not known before generation
+- likely options are distribution-level disagreement against the student or confidence-margin routing
+
+### Baseline Experiments
+
+Compare against:
+- individual source models
+- parameter-level model merging on the Qwen2.5 specialized track
+- linear/model soup merging
+- task arithmetic
+- TIES merging
+- DARE variants
+- off-policy FuseLLM-style distillation
+- off-policy InfiFusion-style distillation
+- InfiFPO-style preference fusion if time allows
+
+Primary question:
+- does on-policy multi-teacher distillation provide gains beyond cheaper model merging and static/off-policy distillation?
+
+### Hardware Plan
+
+Preferred first hardware target:
+- 4 x RTX A6000 46GB
+- `fp16=True`
+- `bf16=False`
+- microbatch size 1
+- gradient accumulation 8 or 16
+- `max_length=512`
+- `max_new_tokens=64` for on-policy runs
+- `max_new_tokens=32` for first `seq_kd` runs
+
+Fallback or scale-up target:
+- 4 x H100 80GB
+- `bf16=True`
+- larger context length or longer `seq_kd` generations
+
+Resource principle:
+- start with 4 A6000s for demos
+- use H100s only when A6000 memory or runtime becomes limiting
+- avoid 8 A6000 runs until the training configuration is stable
+
 ## Optimisations
 
 These optimisations are inspired by `distilling-100b-models-40x-faster-with-trl.pdf` and should be treated as

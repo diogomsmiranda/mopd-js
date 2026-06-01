@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import random
 import textwrap
 from collections.abc import Callable
@@ -20,7 +21,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from datasets import Dataset
+from accelerate import PartialState
+from datasets import Dataset, IterableDataset
 from transformers import (
     AutoModelForCausalLM,
     BaseImageProcessor,
@@ -35,6 +37,7 @@ from transformers import (
 from transformers.trainer_utils import EvalPrediction
 from transformers.utils import is_peft_available
 
+from ...data_utils import is_conversational
 from ...models import prepare_deepspeed
 from ...models.utils import unwrap_model_for_generation
 from ...trainer.sft_trainer import SFTTrainer
@@ -45,6 +48,9 @@ from .multi_teacher_gkd_config import MultiTeacherGKDConfig
 
 if is_peft_available():
     from peft import PeftConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 class MultiTeacherGKDTrainer(SFTTrainer):
@@ -58,7 +64,8 @@ class MultiTeacherGKDTrainer(SFTTrainer):
             Model to be trained, or the string identifier of the model to be instantiated from a pretrained model.
         teacher_models (`list` of [`~transformers.PreTrainedModel`] or `torch.nn.Module` or `str`, *optional*):
             Teacher models for knowledge distillation, or the string identifiers of the models to be instantiated from
-            pretrained models. If `None`, `args.teacher_model_names_or_paths` is used.
+            pretrained models. If `None`, `args.teacher_model_names_or_paths` is used. At least one teacher must be
+            provided through this argument or through `args.teacher_model_names_or_paths`.
         args ([`experimental.multi_teacher_gkd.MultiTeacherGKDConfig`], *optional*):
             Training arguments.
         data_collator ([`~transformers.DataCollator`], *optional*):
@@ -96,6 +103,81 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         "citation": textwrap.dedent(""""""),
     }
 
+    @staticmethod
+    def _prepare_prompt_completion_dataset(
+        dataset: Dataset | IterableDataset | None,
+        processing_class: PreTrainedTokenizerBase
+        | BaseImageProcessor
+        | FeatureExtractionMixin
+        | ProcessorMixin
+        | None,
+        args: MultiTeacherGKDConfig,
+        dataset_name: str,
+    ) -> Dataset | IterableDataset | None:
+        if dataset is None:
+            return None
+
+        first_example = next(iter(dataset))
+        if "input_ids" in first_example or "prompt" not in first_example or "completion" not in first_example:
+            return dataset
+
+        map_kwargs = {}
+        if isinstance(dataset, Dataset):
+            map_kwargs["desc"] = f"Tokenizing {dataset_name} prompt-completion dataset"
+            map_kwargs["num_proc"] = args.dataset_num_proc
+
+        def tokenize_prompt_completion(example, processing_class, max_length):
+            if is_conversational(example):
+                prompt_ids = processing_class.apply_chat_template(
+                    example["prompt"],
+                    add_generation_prompt=True,
+                    return_dict=False,
+                    **example.get("chat_template_kwargs", {}),
+                )
+                prompt_completion_ids = processing_class.apply_chat_template(
+                    example["prompt"] + example["completion"],
+                    add_generation_prompt=False,
+                    return_dict=False,
+                    **example.get("chat_template_kwargs", {}),
+                )
+            else:
+                completion = example["completion"]
+                if processing_class.eos_token is not None and not completion.endswith(processing_class.eos_token):
+                    completion = completion + processing_class.eos_token
+                prompt_ids = processing_class(text=example["prompt"]).input_ids
+                prompt_completion_ids = processing_class(text=example["prompt"] + completion).input_ids
+
+            if prompt_completion_ids[: len(prompt_ids)] != prompt_ids:
+                logger.warning(
+                    "Mismatch between tokenized prompt and the start of tokenized prompt+completion. "
+                    "This may be due to unexpected tokenizer behavior, whitespace issues, or special "
+                    "token handling. Verify that the tokenizer is processing text consistently."
+                )
+
+            completion_ids = prompt_completion_ids[len(prompt_ids) :]
+            if max_length is not None and len(prompt_ids) + len(completion_ids) > max_length:
+                if completion_ids and max_length > 1:
+                    max_prompt_tokens = min(len(prompt_ids), max_length - 1)
+                    prompt_ids = prompt_ids[-max_prompt_tokens:] if max_prompt_tokens > 0 else []
+                    completion_ids = completion_ids[: max_length - len(prompt_ids)]
+                else:
+                    prompt_ids = prompt_ids[-max_length:]
+                    completion_ids = []
+
+            input_ids = prompt_ids + completion_ids
+            return {
+                "input_ids": input_ids,
+                "attention_mask": [1] * len(input_ids),
+                "prompts": prompt_ids,
+            }
+
+        with PartialState().main_process_first():
+            return dataset.map(
+                tokenize_prompt_completion,
+                fn_kwargs={"processing_class": processing_class, "max_length": args.max_length},
+                **map_kwargs,
+            )
+
     def __init__(
         self,
         model: PreTrainedModel | nn.Module | str | None = None,
@@ -118,20 +200,33 @@ class MultiTeacherGKDTrainer(SFTTrainer):
     ):
         if teacher_models is None:
             teacher_models = args.teacher_model_names_or_paths
+        if teacher_models is None or len(teacher_models) == 0:
+            raise ValueError("teacher_models must contain at least one teacher model.")
+        if args.teacher_weights is not None and len(args.teacher_weights) != len(teacher_models):
+            raise ValueError("teacher_weights must have the same length as teacher_models.")
         self.teacher_metric_names = self._get_teacher_metric_names(teacher_models)
 
         # Ensure Trainer does not drop non-signature columns used by the collator (e.g., "prompts")
         args.remove_unused_columns = False
-        # Respect a user-provided data_collator; otherwise, provide a ChatML collator that
+        # Respect a user-provided data_collator; otherwise, provide a ChatML collator.
         if data_collator is None:
             data_collator = DataCollatorForChatML(tokenizer=processing_class, max_length=args.max_length)
 
-        # Ensure SFTTrainer does not pre-process the dataset when using a ChatML collator,
-        # so that raw conversational fields (e.g., "messages") remain available to the collator.
+        # Ensure SFTTrainer does not pre-process the dataset when using this collator, so that raw conversational
+        # fields remain available. Raw prompt-completion datasets are prepared below before SFTTrainer initializes.
         if args.dataset_kwargs is None:
             args.dataset_kwargs = {"skip_prepare_dataset": True}
         else:
             args.dataset_kwargs["skip_prepare_dataset"] = True
+
+        train_dataset = self._prepare_prompt_completion_dataset(train_dataset, processing_class, args, "train")
+        if isinstance(eval_dataset, dict):
+            eval_dataset = {
+                key: self._prepare_prompt_completion_dataset(dataset, processing_class, args, key)
+                for key, dataset in eval_dataset.items()
+            }
+        else:
+            eval_dataset = self._prepare_prompt_completion_dataset(eval_dataset, processing_class, args, "eval")
 
         super().__init__(
             model,

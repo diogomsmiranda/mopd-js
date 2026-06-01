@@ -17,11 +17,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn.functional as F
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 from trl.experimental.gkd import GKDConfig, GKDTrainer
 from trl.experimental.multi_teacher_gkd import MultiTeacherGKDConfig, MultiTeacherGKDTrainer
+from trl.experimental.utils import DataCollatorForChatML
 
 from ..testing_utils import TrlTestCase
 
@@ -233,6 +234,13 @@ class TestMultiTeacherGKDConfig(TrlTestCase):
                 teacher_aggregation="unsupported",
             )
 
+        with pytest.raises(ValueError, match="teacher_model_names_or_paths must contain at least one teacher model"):
+            MultiTeacherGKDConfig(
+                output_dir=self.tmp_dir,
+                bf16=False,
+                teacher_model_names_or_paths=[],
+            )
+
 
 class TestMultiTeacherGKDTrainer(TrlTestCase):
     def setup_method(self):
@@ -309,6 +317,106 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         assert any(
             not torch.allclose(param, trainer.model.get_parameter(n)) for n, param in previous_trainable_params.items()
         )
+
+    def test_multi_teacher_gkd_prompt_completion_dataset(self):
+        training_args = MultiTeacherGKDConfig(
+            output_dir=self.tmp_dir,
+            bf16=False,
+            teacher_model_names_or_paths=[self.model_id, self.model_id],
+            max_steps=1,
+            per_device_train_batch_size=1,
+            report_to="none",
+        )
+        dataset = Dataset.from_dict(
+            {
+                "prompt": ["Question: 1+1? Answer:"],
+                "completion": [" 2"],
+            }
+        )
+
+        trainer = MultiTeacherGKDTrainer(
+            model=self.model_id,
+            args=training_args,
+            train_dataset=dataset,
+            processing_class=self.tokenizer,
+        )
+
+        trainer.train()
+
+        assert trainer.state.log_history[-1]["train_loss"] is not None
+
+    def test_prompt_completion_dataset_preserves_prompt_when_truncated(self):
+        training_args = MultiTeacherGKDConfig(
+            output_dir=self.tmp_dir,
+            bf16=False,
+            max_length=16,
+            report_to="none",
+        )
+        dataset = Dataset.from_dict(
+            {
+                "prompt": ["Question: 1+1? Answer:"],
+                "completion": [" " + "word " * 100],
+            }
+        )
+
+        prepared_dataset = MultiTeacherGKDTrainer._prepare_prompt_completion_dataset(
+            dataset, self.tokenizer, training_args, "train"
+        )
+        data_collator = DataCollatorForChatML(tokenizer=self.tokenizer, max_length=training_args.max_length)
+        batch = data_collator([prepared_dataset[0]])
+
+        assert batch["input_ids"].shape[1] == 16
+        assert batch["prompts"].shape[1] > 0
+
+        decoded_prompt = self.tokenizer.decode(batch["prompts"][0], skip_special_tokens=True)
+        assert "Question" in decoded_prompt
+
+        prompt_length = batch["prompts"].shape[1]
+        labels = batch["labels"][0]
+        assert labels[:prompt_length].eq(-100).all()
+        assert labels[prompt_length:].ne(-100).any()
+
+    def test_instantiated_teacher_models(self):
+        training_args = MultiTeacherGKDConfig(
+            output_dir=self.tmp_dir,
+            bf16=False,
+            report_to="none",
+        )
+        teacher_models = [
+            AutoModelForCausalLM.from_pretrained(self.model_id),
+            AutoModelForCausalLM.from_pretrained(self.model_id),
+        ]
+        inputs = self._prepare_inputs()
+
+        trainer = MultiTeacherGKDTrainer(
+            model=self.model_id,
+            teacher_models=teacher_models,
+            args=training_args,
+            train_dataset=self._dummy_train_dataset(),
+            processing_class=self.tokenizer,
+        )
+
+        loss = trainer.compute_loss(trainer.model, inputs)
+
+        assert len(trainer.teacher_models) == 2
+        assert torch.is_tensor(loss)
+
+    def test_instantiated_teacher_weight_validation(self):
+        training_args = MultiTeacherGKDConfig(
+            output_dir=self.tmp_dir,
+            bf16=False,
+            teacher_weights=[1.0],
+            report_to="none",
+        )
+
+        with pytest.raises(ValueError, match="teacher_weights must have the same length as teacher_models"):
+            MultiTeacherGKDTrainer(
+                model=self.model_id,
+                teacher_models=[torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)],
+                args=training_args,
+                train_dataset=self._dummy_train_dataset(),
+                processing_class=self.tokenizer,
+            )
 
     def test_single_teacher_parity_with_gkd(self):
         gkd_args = GKDConfig(
