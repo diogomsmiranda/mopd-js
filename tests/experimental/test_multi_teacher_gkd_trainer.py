@@ -629,3 +629,45 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         expected_teacher_log_probs = torch.log(expected_teacher_probs).view(1, 1, 3)
 
         torch.testing.assert_close(aggregated_teacher_log_probs, expected_teacher_log_probs)
+
+    def test_aggregate_teacher_log_probs_returns_metrics(self):
+        class DummyTeacherModel:
+            def __init__(self, logits):
+                self.logits = logits
+
+            def eval(self):
+                return self
+
+            def __call__(self, input_ids, attention_mask):
+                return SimpleNamespace(logits=self.logits)
+
+        teacher_1_probs = torch.tensor([0.8, 0.1, 0.1])
+        teacher_2_probs = torch.tensor([0.1, 0.8, 0.1])
+        teacher_1_logits = torch.log(teacher_1_probs).view(1, 1, 3).repeat(1, 2, 1)
+        teacher_2_logits = torch.log(teacher_2_probs).view(1, 1, 3).repeat(1, 2, 1)
+        teacher_weights = torch.tensor([0.25, 0.75])
+
+        trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
+        trainer.teacher_models = [DummyTeacherModel(teacher_1_logits), DummyTeacherModel(teacher_2_logits)]
+        trainer.teacher_weights = teacher_weights
+        trainer.temperature = 1.0
+
+        teacher_metrics, aggregated_teacher_log_probs = trainer._aggregate_teacher_log_probs(
+            input_ids=torch.ones(1, 2, dtype=torch.long),
+            attention_mask=torch.ones(1, 2, dtype=torch.long),
+            prompt_lengths=1,
+            shifted_labels=torch.tensor([[0]]),
+        )
+        expected_teacher_probs = teacher_weights[0] * teacher_1_probs + teacher_weights[1] * teacher_2_probs
+        expected_teacher_log_probs = torch.log(expected_teacher_probs).view(1, 1, 3)
+
+        torch.testing.assert_close(aggregated_teacher_log_probs, expected_teacher_log_probs)
+        assert len(teacher_metrics) == 2
+        assert teacher_metrics[0]["selected_logprob"] == pytest.approx(torch.log(teacher_1_probs[0]).item())
+        assert teacher_metrics[1]["selected_logprob"] == pytest.approx(torch.log(teacher_2_probs[0]).item())
+        assert teacher_metrics[0]["entropy"] == pytest.approx(-(teacher_1_probs * torch.log(teacher_1_probs)).sum().item())
+        assert teacher_metrics[1]["entropy"] == pytest.approx(-(teacher_2_probs * torch.log(teacher_2_probs)).sum().item())
+        assert teacher_metrics[0]["confidence"] == pytest.approx(teacher_1_probs.max().item())
+        assert teacher_metrics[1]["confidence"] == pytest.approx(teacher_2_probs.max().item())
+        assert teacher_metrics[0]["weight"] == pytest.approx(teacher_weights[0].item())
+        assert teacher_metrics[1]["weight"] == pytest.approx(teacher_weights[1].item())
