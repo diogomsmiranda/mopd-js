@@ -422,7 +422,9 @@ kl_student = F.kl_div(mixture_log_probs, student_log_probs, reduction="none", lo
 jsd = beta * kl_teacher + (1 - beta) * kl_student
 ```
 
-Then padding tokens are masked using `labels != -100`, and the loss is reduced.
+When `labels` are provided, the implementation computes the same masked JSD over valid supervised positions in chunks.
+This keeps full-vocabulary KL tensors bounded during large multi-teacher runs while preserving the same objective. Padding
+tokens are masked using `labels != -100`, and the loss is reduced by the number of valid supervised tokens.
 
 ### `_aggregate_teacher_log_probs(...)`
 
