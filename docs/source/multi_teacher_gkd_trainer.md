@@ -404,8 +404,8 @@ This function therefore takes `student_log_probs` and `teacher_log_probs` direct
 Core mixture logic:
 
 ```python
-mixture_log_probs = torch.logsumexp(
-    torch.stack([student_log_probs + torch.log1p(-beta), teacher_log_probs + torch.log(beta)]), dim=0
+mixture_log_probs = torch.logaddexp(
+    student_log_probs + torch.log1p(-beta), teacher_log_probs + torch.log(beta)
 )
 ```
 
@@ -429,7 +429,7 @@ Then padding tokens are masked using `labels != -100`, and the loss is reduced.
 Code shape:
 
 ```python
-def _aggregate_teacher_log_probs(self, input_ids, attention_mask, prompt_lengths):
+def _aggregate_teacher_log_probs(self, input_ids, attention_mask, prompt_lengths, shifted_labels=None):
 ```
 
 This method is the core of the multi-teacher loss path.
@@ -438,12 +438,12 @@ It does three things:
 
 1. run every teacher on the same sequence
 2. extract teacher distributions on the generated region only
-3. fuse those teacher distributions with static weights
+3. fuse those teacher distributions with static weights without stacking all teachers at once
 
 Per-teacher forward pass:
 
 ```python
-for teacher_model in self.teacher_models:
+for teacher_idx, teacher_model in enumerate(self.teacher_models):
     teacher_model.eval()
     with torch.no_grad():
         teacher_outputs = teacher_model(input_ids=input_ids, attention_mask=attention_mask)
@@ -453,7 +453,7 @@ Then it slices the teacher logits to the completion region:
 
 ```python
 shifted_teacher_logits = teacher_outputs.logits[:, prompt_lengths - 1 : -1, :] / self.temperature
-teacher_log_probs.append(F.log_softmax(shifted_teacher_logits, dim=-1))
+teacher_log_probs = F.log_softmax(shifted_teacher_logits, dim=-1)
 ```
 
 Why `prompt_lengths - 1 : -1`:
@@ -464,19 +464,25 @@ Why `prompt_lengths - 1 : -1`:
 Finally, fusion happens here:
 
 ```python
-teacher_log_probs = torch.stack(teacher_log_probs, dim=0)
-teacher_weights = self.teacher_weights.to(device=teacher_log_probs.device, dtype=teacher_log_probs.dtype)
-aggregated_teacher_log_probs = torch.logsumexp(teacher_log_probs + teacher_weights.log().view(-1, 1, 1, 1), dim=0)
-return teacher_log_probs, aggregated_teacher_log_probs
+teacher_weight = teacher_weights[teacher_idx].to(dtype=teacher_log_probs.dtype).log()
+teacher_log_probs.add_(teacher_weight)
+if aggregated_teacher_log_probs is None:
+    aggregated_teacher_log_probs = teacher_log_probs
+else:
+    aggregated_teacher_log_probs = torch.logaddexp(aggregated_teacher_log_probs, teacher_log_probs)
+return teacher_metrics, aggregated_teacher_log_probs
 ```
 
 Meaning:
 
-- stack all teacher log-probabilities
-- add log weights
-- apply log-sum-exp over the teacher axis
+- add each teacher's log weight to its log-probabilities
+- merge each weighted teacher distribution into the running fused distribution with `torch.logaddexp`
 - this gives the fused teacher distribution in log-probability space
-- return both the per-teacher log-probs for diagnostics and the fused log-probs for the loss
+- return per-teacher scalar diagnostics and the fused log-probs for the loss
+
+This streaming aggregation is mathematically equivalent to stacking teachers and applying `logsumexp` over the teacher
+axis, but it avoids materializing a `[num_teachers, batch_size, sequence_length, vocab_size]` tensor. This matters for
+large-vocabulary multi-teacher runs where the stacked teacher tensor can dominate memory usage.
 
 This is the exact Phase 1 multi-teacher idea: static fusion in probability space.
 
@@ -510,11 +516,14 @@ shifted_student_log_probs = F.log_softmax(shifted_student_logits, dim=-1)
 Then it gets the fused teacher target:
 
 ```python
-teacher_log_probs, aggregated_teacher_log_probs = self._aggregate_teacher_log_probs(
+shifted_labels = inputs["labels"][:, prompt_lengths:]
+teacher_metrics, aggregated_teacher_log_probs = self._aggregate_teacher_log_probs(
     input_ids=inputs["input_ids"],
     attention_mask=inputs["attention_mask"],
     prompt_lengths=prompt_lengths,
+    shifted_labels=shifted_labels,
 )
+self._log_distribution_metrics(teacher_metrics, aggregated_teacher_log_probs, shifted_labels)
 ```
 
 Then it computes the final distillation loss:
