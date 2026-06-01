@@ -140,21 +140,20 @@ class MultiTeacherGKDTrainer(SFTTrainer):
                     return_dict=False,
                     **example.get("chat_template_kwargs", {}),
                 )
+                if prompt_completion_ids[: len(prompt_ids)] != prompt_ids:
+                    logger.warning(
+                        "Mismatch between tokenized prompt and the start of tokenized prompt+completion. "
+                        "This may be due to unexpected tokenizer behavior, whitespace issues, or special "
+                        "token handling. Verify that the tokenizer is processing text consistently."
+                    )
+                completion_ids = prompt_completion_ids[len(prompt_ids) :]
             else:
                 completion = example["completion"]
                 if processing_class.eos_token is not None and not completion.endswith(processing_class.eos_token):
                     completion = completion + processing_class.eos_token
-                prompt_ids = processing_class(text=example["prompt"]).input_ids
-                prompt_completion_ids = processing_class(text=example["prompt"] + completion).input_ids
+                prompt_ids = processing_class(text=example["prompt"], add_special_tokens=False).input_ids
+                completion_ids = processing_class(text=completion, add_special_tokens=False).input_ids
 
-            if prompt_completion_ids[: len(prompt_ids)] != prompt_ids:
-                logger.warning(
-                    "Mismatch between tokenized prompt and the start of tokenized prompt+completion. "
-                    "This may be due to unexpected tokenizer behavior, whitespace issues, or special "
-                    "token handling. Verify that the tokenizer is processing text consistently."
-                )
-
-            completion_ids = prompt_completion_ids[len(prompt_ids) :]
             if max_length is not None and len(prompt_ids) + len(completion_ids) > max_length:
                 if completion_ids and max_length > 1:
                     max_prompt_tokens = min(len(prompt_ids), max_length - 1)
