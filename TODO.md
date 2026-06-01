@@ -52,10 +52,6 @@
 - [x] Add `MultiTeacherGKDTrainer` to `docs/source/index.md`
 - [x] Add dataset-format row to `docs/source/dataset_formats.md`
 
-### Optional After MVP
-
-- [ ] Add `examples/scripts/multi_teacher_gkd.py`
-
 ## Phase 2: Thesis-Specific Diagnostics
 
 - [x] Add per-teacher metrics and logging
@@ -87,6 +83,11 @@
 - [ ] Investigate heterogeneous tokenizer support
 - [ ] Investigate GRPO-style reward hybridization
 - [ ] Evaluate whether cross-tokenizer alignment should live in this trainer or a separate experimental trainer
+
+## Non-Critical Later Work
+
+- [ ] Add a `docs/source/paper_index.md` entry for the multi-teacher/fused-teacher distillation method
+- [ ] Add `examples/scripts/multi_teacher_gkd.py`
 
 ## Optimisations
 

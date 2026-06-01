@@ -217,15 +217,18 @@ class DataCollatorForChatML:
                 else:
                     attention_mask.append([1] * len(message_input_ids))
 
-                tokenized_prompt = self.tokenizer(
-                    formatted_prompt,
-                    truncation=True,
-                    max_length=len(message_input_ids),
-                    padding=False,
-                    return_tensors=None,
-                    add_special_tokens=False,
-                )
-                current_prompt_ids = tokenized_prompt["input_ids"]
+                if "prompts" in example:
+                    current_prompt_ids = example["prompts"]
+                else:
+                    tokenized_prompt = self.tokenizer(
+                        formatted_prompt,
+                        truncation=True,
+                        max_length=len(message_input_ids),
+                        padding=False,
+                        return_tensors=None,
+                        add_special_tokens=False,
+                    )
+                    current_prompt_ids = tokenized_prompt["input_ids"]
 
             prompts_input_ids.append(current_prompt_ids)
             prompt_attention_mask.append([1] * len(current_prompt_ids))
