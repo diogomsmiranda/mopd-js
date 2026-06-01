@@ -342,6 +342,46 @@ class MultiTeacherGKDTrainer(SFTTrainer):
 
     @staticmethod
     def generalized_jsd_loss_from_log_probs(student_log_probs, teacher_log_probs, labels=None, beta=0.5):
+        if labels is not None:
+            mask = labels != -100
+            num_tokens = mask.sum()
+            if num_tokens == 0:
+                return student_log_probs.new_tensor(0.0)
+
+            valid_positions = mask.reshape(-1).nonzero().flatten()
+            seq_length = mask.size(1)
+
+            loss = student_log_probs.new_tensor(0.0)
+            beta_tensor = torch.tensor(beta, dtype=student_log_probs.dtype, device=student_log_probs.device)
+            chunk_size = 64
+            for start in range(0, valid_positions.size(0), chunk_size):
+                end = start + chunk_size
+                chunk_positions = valid_positions[start:end]
+                batch_positions = chunk_positions // seq_length
+                token_positions = chunk_positions % seq_length
+                student_log_probs_chunk = student_log_probs[batch_positions, token_positions]
+                teacher_log_probs_chunk = teacher_log_probs[batch_positions, token_positions]
+
+                if beta == 0:
+                    loss = loss + F.kl_div(
+                        student_log_probs_chunk, teacher_log_probs_chunk, reduction="sum", log_target=True
+                    )
+                elif beta == 1:
+                    loss = loss + F.kl_div(
+                        teacher_log_probs_chunk, student_log_probs_chunk, reduction="sum", log_target=True
+                    )
+                else:
+                    # Keep full-vocab tensors bounded for long completions.
+                    mixture_log_probs = torch.logaddexp(
+                        student_log_probs_chunk + torch.log1p(-beta_tensor),
+                        teacher_log_probs_chunk + torch.log(beta_tensor),
+                    )
+                    kl_teacher = F.kl_div(mixture_log_probs, teacher_log_probs_chunk, reduction="sum", log_target=True)
+                    kl_student = F.kl_div(mixture_log_probs, student_log_probs_chunk, reduction="sum", log_target=True)
+                    loss = loss + beta_tensor * kl_teacher + (1 - beta_tensor) * kl_student
+
+            return loss / num_tokens
+
         # Compute log probabilities for student and probabilities for teacher
         if beta == 0:
             jsd = F.kl_div(student_log_probs, teacher_log_probs, reduction="none", log_target=True)

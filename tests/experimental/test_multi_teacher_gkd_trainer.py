@@ -197,6 +197,31 @@ class TestMultiTeacherGeneralizedJSDLoss(TrlTestCase):
         assert torch.is_tensor(loss)
         assert loss.shape == torch.Size([])
 
+    def test_masked_loss_matches_vectorized_jsd(self):
+        student_log_probs = F.log_softmax(torch.randn(2, 70, 5), dim=-1)
+        teacher_log_probs = F.log_softmax(torch.randn(2, 70, 5), dim=-1)
+        labels = torch.zeros(2, 70, dtype=torch.long)
+        labels[:, ::3] = -100
+        beta = 0.3
+
+        loss = MultiTeacherGKDTrainer.generalized_jsd_loss_from_log_probs(
+            student_log_probs,
+            teacher_log_probs,
+            labels=labels,
+            beta=beta,
+        )
+
+        beta_tensor = torch.tensor(beta, dtype=student_log_probs.dtype, device=student_log_probs.device)
+        mixture_log_probs = torch.logaddexp(
+            student_log_probs + torch.log1p(-beta_tensor), teacher_log_probs + torch.log(beta_tensor)
+        )
+        kl_teacher = F.kl_div(mixture_log_probs, teacher_log_probs, reduction="none", log_target=True)
+        kl_student = F.kl_div(mixture_log_probs, student_log_probs, reduction="none", log_target=True)
+        expected_loss = (beta_tensor * kl_teacher + (1 - beta_tensor) * kl_student)[labels != -100].sum()
+        expected_loss = expected_loss / (labels != -100).sum()
+
+        torch.testing.assert_close(loss, expected_loss)
+
     def test_zero_loss_for_identical_inputs(self):
         identical_log_probs = F.log_softmax(torch.randn(self.batch_size, self.seq_length, self.vocab_size), dim=-1)
         loss = MultiTeacherGKDTrainer.generalized_jsd_loss_from_log_probs(identical_log_probs, identical_log_probs)
