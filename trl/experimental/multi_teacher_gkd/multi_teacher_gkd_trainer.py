@@ -346,7 +346,7 @@ class MultiTeacherGKDTrainer(SFTTrainer):
             mask = labels != -100
             num_tokens = mask.sum()
             if num_tokens == 0:
-                return student_log_probs.new_tensor(0.0)
+                return student_log_probs.sum() * 0.0
 
             valid_positions = mask.reshape(-1).nonzero().flatten()
             seq_length = mask.size(1)
@@ -501,6 +501,11 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         if not return_outputs:
             del student_outputs
         shifted_labels = inputs["labels"][:, prompt_lengths:]
+        mode = "train" if self.model.training else "eval"
+        num_target_tokens = (shifted_labels != -100).sum().detach().reshape(1)
+        gathered_num_target_tokens = self.accelerator.gather(num_target_tokens)
+        self._metrics[mode]["target_tokens"].append(gathered_num_target_tokens.float().mean().item())
+        self._metrics[mode]["empty_target_batches"].append((gathered_num_target_tokens == 0).float().mean().item())
         teacher_metrics, aggregated_teacher_log_probs = self._aggregate_teacher_log_probs(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
