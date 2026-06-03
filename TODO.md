@@ -63,11 +63,16 @@
 ## Phase 3: Adaptive Token-Level Aggregation
 
 - [ ] Add config options for adaptive aggregation
-- [ ] Implement token-level teacher weighting
-- [ ] Add `max_margin` teacher routing
-- [ ] Add `confidence_weighted` teacher routing
-- [ ] Update `_aggregate_teacher_log_probs(...)` for dynamic weights
-- [ ] Add tests for adaptive routing behavior
+- [ ] Add `confidence_weighted` teacher routing first
+- [ ] Implement `confidence_weighted` with the thesis formula `C_k = 1 / (-log P_Tk(y_t | x) + eps)` and `softmax(C_k)` over teachers
+- [ ] Add tests showing `confidence_weighted` favors the teacher with higher selected-token confidence
+- [ ] Preserve streaming aggregation for adaptive modes; do not stack `[num_teachers, batch_size, sequence_length, vocab_size]`
+- [ ] Update `_aggregate_teacher_log_probs(...)` for dynamic per-token weights
+- [ ] Add tests proving `uniform` and `static_weighted` behavior remains unchanged after adaptive changes
+- [ ] Add `max_margin` teacher routing after `confidence_weighted` is stable
+- [ ] Implement `max_margin` with the thesis formula `argmax_k abs(P_Tk(y_t | x) - Q(y_t | x))`
+- [ ] Pass student selected-token probabilities into the aggregation path for `max_margin`
+- [ ] Add tests showing `max_margin` selects the teacher with largest teacher-student selected-token probability gap
 - [ ] Add docs for adaptive aggregation modes
 
 ## Phase 4: Advanced Thesis Extensions

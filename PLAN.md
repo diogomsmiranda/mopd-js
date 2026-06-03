@@ -335,11 +335,36 @@ Status:
 Extend same files, no new abstraction layer.
 
 Add config options:
-- `teacher_aggregation = "max_margin"` or `"confidence_weighted"`
+- `teacher_aggregation = "confidence_weighted"`
+- `teacher_aggregation = "max_margin"`
 
 Add trainer methods:
 - `_compute_teacher_token_weights(...)`
 - `_aggregate_teacher_log_probs(...)` updated for dynamic per-token weights
+
+Implementation order:
+- Phase 3A: implement `confidence_weighted` first
+- Phase 3B: implement `max_margin` after the confidence-weighted path is stable
+
+`confidence_weighted` definition from the thesis document:
+- use selected-token teacher confidence, not entropy, as the primary implementation
+- for teacher `k` and supervised/generated token `y_t`, compute:
+  - `selected_logprob_k = log P_Tk(y_t | x)`
+  - `C_k = 1 / (-selected_logprob_k + eps)`
+  - `pi_k = softmax(C_k over teachers)`
+- apply these dynamic `pi_k` weights per token before constructing the fused teacher distribution
+
+`max_margin` definition from the thesis document:
+- use winner-takes-all routing based on the selected-token probability margin between teacher and student
+- for teacher `k`, compute:
+  - `margin_k = abs(P_Tk(y_t | x) - Q(y_t | x))`
+  - `pi_k = 1` for the teacher with the largest margin and `0` for all others
+- this path requires student selected-token probabilities in the aggregation path
+
+Memory requirement:
+- preserve the streaming aggregation design
+- do not materialize `[num_teachers, batch_size, sequence_length, vocab_size]` tensors
+- for adaptive modes, compute small per-teacher selected-token score tensors first, then stream-fuse full-vocabulary teacher distributions with dynamic token weights
 
 This is where the thesis-specific adaptive routing starts.
 
@@ -473,9 +498,10 @@ Primary question:
 - does token-level teacher weighting outperform uniform/static fusion by prioritizing the most relevant expert?
 
 Implementation note:
-- adaptive aggregation requires student log-probs in the aggregation path
-- `max_margin` should use the supervised/generated token probability difference between each teacher and the student
-- `confidence_weighted` should weight teachers using selected-token confidence or entropy-derived confidence
+- `confidence_weighted` should follow the thesis formula: `C_k = 1 / (-log P_Tk(y_t | x) + eps)`, then `softmax(C_k)` over teachers
+- `max_margin` should follow the thesis formula: winner-takes-all on `abs(P_Tk(y_t | x) - Q(y_t | x))`
+- `max_margin` requires student selected-token probabilities in the aggregation path
+- adaptive aggregation must preserve streaming full-vocabulary fusion to avoid multi-teacher OOMs
 
 ### Experiment 6: Multi-Distribution Consensus Objective
 
