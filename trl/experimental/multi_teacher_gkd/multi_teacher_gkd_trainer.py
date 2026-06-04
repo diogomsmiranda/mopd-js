@@ -334,7 +334,7 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         return prepared_teacher_models
 
     def _normalize_teacher_weights(self, teacher_weights: list[float] | None) -> torch.Tensor:
-        if self.teacher_aggregation == "uniform" or teacher_weights is None:
+        if self.teacher_aggregation != "static_weighted" or teacher_weights is None:
             normalized_teacher_weights = torch.ones(len(self.teacher_models), dtype=torch.float32)
         else:
             normalized_teacher_weights = torch.tensor(teacher_weights, dtype=torch.float32)
@@ -410,9 +410,13 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         return jsd.sum() / mask.sum() if labels is not None else jsd.sum() / jsd.size(0)
 
     def _aggregate_teacher_log_probs(self, input_ids, attention_mask, prompt_lengths, shifted_labels=None):
+        if self.teacher_aggregation == "confidence_weighted" and shifted_labels is None:
+            raise ValueError("shifted_labels must be provided when teacher_aggregation='confidence_weighted'.")
+
         teacher_metrics = []
         aggregated_teacher_log_probs = None
         teacher_weights = self.teacher_weights.to(device=input_ids.device)
+        selected_teacher_log_probs = []
 
         valid_mask = None
         safe_labels = None
@@ -444,19 +448,54 @@ class MultiTeacherGKDTrainer(SFTTrainer):
                         "selected_logprob": masked_mean(selected_log_probs).item(),
                         "entropy": masked_mean(entropy).item(),
                         "confidence": masked_mean(confidence).item(),
-                        "weight": self.teacher_weights[teacher_idx].item(),
                     }
                 )
+                if self.teacher_aggregation in ["static_weighted", "uniform"]:
+                    teacher_metrics[-1]["weight"] = teacher_weights[teacher_idx].item()
+                else:
+                    selected_teacher_log_probs.append(selected_log_probs)
                 del teacher_probs, selected_log_probs, entropy, confidence
 
-            # Aggregate the teacher distributions in probability space.
-            teacher_weight = teacher_weights[teacher_idx].to(dtype=teacher_log_probs.dtype).log()
-            teacher_log_probs.add_(teacher_weight)
-            if aggregated_teacher_log_probs is None:
-                aggregated_teacher_log_probs = teacher_log_probs
-            else:
-                aggregated_teacher_log_probs = torch.logaddexp(aggregated_teacher_log_probs, teacher_log_probs)
+            if self.teacher_aggregation != "confidence_weighted":
+                # Aggregate the teacher distributions in probability space.
+                teacher_weight = teacher_weights[teacher_idx].to(dtype=teacher_log_probs.dtype).log()
+                teacher_log_probs.add_(teacher_weight)
+                if aggregated_teacher_log_probs is None:
+                    aggregated_teacher_log_probs = teacher_log_probs
+                else:
+                    aggregated_teacher_log_probs = torch.logaddexp(aggregated_teacher_log_probs, teacher_log_probs)
             del teacher_log_probs
+
+        if self.teacher_aggregation == "confidence_weighted":
+            # Eq. (14) in the document: C_k = 1 / (-log P_Tk(y_t | x) + eps), then softmax over teachers.
+            selected_teacher_log_probs = torch.stack(selected_teacher_log_probs, dim=0)
+            teacher_scores = 1 / (-selected_teacher_log_probs + 1e-8)
+            log_teacher_token_weights = F.log_softmax(teacher_scores, dim=0)
+            teacher_token_weights = log_teacher_token_weights.exp()
+            for teacher_idx, teacher_metrics_i in enumerate(teacher_metrics):
+                teacher_metrics_i["weight"] = masked_mean(teacher_token_weights[teacher_idx]).item()
+            del selected_teacher_log_probs, teacher_scores, teacher_token_weights
+
+            for teacher_idx, teacher_model in enumerate(self.teacher_models):
+                # compute teacher output in eval mode
+                teacher_model.eval()
+                with torch.no_grad():
+                    teacher_outputs = teacher_model(input_ids=input_ids, attention_mask=attention_mask)
+
+                # slice the logits for the generated tokens using the inputs["prompts"] lengths
+                shifted_teacher_logits = teacher_outputs.logits[:, prompt_lengths - 1 : -1, :] / self.temperature
+                teacher_log_probs = F.log_softmax(shifted_teacher_logits, dim=-1)
+                del teacher_outputs, shifted_teacher_logits
+
+                teacher_log_probs.add_(
+                    log_teacher_token_weights[teacher_idx].unsqueeze(-1).to(teacher_log_probs.dtype)
+                )
+                if aggregated_teacher_log_probs is None:
+                    aggregated_teacher_log_probs = teacher_log_probs
+                else:
+                    aggregated_teacher_log_probs = torch.logaddexp(aggregated_teacher_log_probs, teacher_log_probs)
+                del teacher_log_probs
+            del log_teacher_token_weights
 
         return teacher_metrics, aggregated_teacher_log_probs
 
