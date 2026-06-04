@@ -259,6 +259,14 @@ class TestMultiTeacherGKDConfig(TrlTestCase):
                 teacher_aggregation="unsupported",
             )
 
+        training_args = MultiTeacherGKDConfig(
+            output_dir=self.tmp_dir,
+            bf16=False,
+            teacher_model_names_or_paths=model_ids,
+            teacher_aggregation="confidence_weighted",
+        )
+        assert training_args.teacher_aggregation == "confidence_weighted"
+
         with pytest.raises(ValueError, match="teacher_model_names_or_paths must contain at least one teacher model"):
             MultiTeacherGKDConfig(
                 output_dir=self.tmp_dir,
@@ -641,6 +649,7 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         teacher_weights = torch.tensor([0.25, 0.75])
 
         trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
+        trainer.teacher_aggregation = "static_weighted"
         trainer.teacher_models = [DummyTeacherModel(teacher_1_logits), DummyTeacherModel(teacher_2_logits)]
         trainer.teacher_weights = teacher_weights
         trainer.temperature = 1.0
@@ -673,6 +682,7 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         teacher_weights = torch.tensor([0.25, 0.75])
 
         trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
+        trainer.teacher_aggregation = "static_weighted"
         trainer.teacher_models = [DummyTeacherModel(teacher_1_logits), DummyTeacherModel(teacher_2_logits)]
         trainer.teacher_weights = teacher_weights
         trainer.temperature = 1.0
@@ -696,3 +706,55 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         assert teacher_metrics[1]["confidence"] == pytest.approx(teacher_2_probs.max().item())
         assert teacher_metrics[0]["weight"] == pytest.approx(teacher_weights[0].item())
         assert teacher_metrics[1]["weight"] == pytest.approx(teacher_weights[1].item())
+
+    def test_aggregate_teacher_log_probs_confidence_weighted(self):
+        class DummyTeacherModel:
+            def __init__(self, logits):
+                self.logits = logits
+
+            def eval(self):
+                return self
+
+            def __call__(self, input_ids, attention_mask):
+                return SimpleNamespace(logits=self.logits)
+
+        teacher_1_probs = torch.tensor([0.8, 0.1, 0.1])
+        teacher_2_probs = torch.tensor([0.1, 0.8, 0.1])
+        teacher_1_logits = torch.log(teacher_1_probs).view(1, 1, 3).repeat(1, 2, 1)
+        teacher_2_logits = torch.log(teacher_2_probs).view(1, 1, 3).repeat(1, 2, 1)
+
+        trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
+        trainer.teacher_aggregation = "confidence_weighted"
+        trainer.teacher_models = [DummyTeacherModel(teacher_1_logits), DummyTeacherModel(teacher_2_logits)]
+        trainer.teacher_weights = torch.tensor([0.5, 0.5])
+        trainer.temperature = 1.0
+
+        teacher_metrics, aggregated_teacher_log_probs = trainer._aggregate_teacher_log_probs(
+            input_ids=torch.ones(1, 2, dtype=torch.long),
+            attention_mask=torch.ones(1, 2, dtype=torch.long),
+            prompt_lengths=1,
+            shifted_labels=torch.tensor([[0]]),
+        )
+
+        selected_log_probs = torch.log(torch.tensor([teacher_1_probs[0], teacher_2_probs[0]])).view(2, 1, 1)
+        teacher_token_weights = F.softmax(1 / (-selected_log_probs + 1e-8), dim=0)
+        expected_teacher_probs = (
+            teacher_token_weights[0, 0, 0] * teacher_1_probs + teacher_token_weights[1, 0, 0] * teacher_2_probs
+        )
+        expected_teacher_log_probs = torch.log(expected_teacher_probs).view(1, 1, 3)
+
+        torch.testing.assert_close(aggregated_teacher_log_probs, expected_teacher_log_probs)
+        assert teacher_metrics[0]["weight"] > teacher_metrics[1]["weight"]
+        assert teacher_metrics[0]["weight"] == pytest.approx(teacher_token_weights[0, 0, 0].item())
+        assert teacher_metrics[1]["weight"] == pytest.approx(teacher_token_weights[1, 0, 0].item())
+
+    def test_aggregate_teacher_log_probs_confidence_weighted_requires_labels(self):
+        trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
+        trainer.teacher_aggregation = "confidence_weighted"
+
+        with pytest.raises(ValueError, match="shifted_labels must be provided"):
+            trainer._aggregate_teacher_log_probs(
+                input_ids=torch.ones(1, 2, dtype=torch.long),
+                attention_mask=torch.ones(1, 2, dtype=torch.long),
+                prompt_lengths=1,
+            )

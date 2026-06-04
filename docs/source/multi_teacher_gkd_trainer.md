@@ -110,8 +110,8 @@ What it means:
 teacher_aggregation: str = field(
     default="uniform",
     metadata={
-        "help": "Strategy used to aggregate teacher distributions. Supported values are 'uniform' and "
-        "'static_weighted'."
+        "help": "Strategy used to aggregate teacher distributions. Supported values are 'uniform', "
+        "'static_weighted', and 'confidence_weighted'."
     },
 )
 ```
@@ -122,8 +122,10 @@ What it means:
 - current options are:
   - `"uniform"`
   - `"static_weighted"`
+  - `"confidence_weighted"`
 
-At the moment, this is still Phase 1 logic: static fusion only, no adaptive token-level routing yet.
+`confidence_weighted` is the Phase 3A adaptive routing mode. It uses the thesis confidence formula based on the
+selected supervised/generated token: `C_k = 1 / (-log P_Tk(y_t | x) + eps)`, followed by a softmax over teachers.
 
 ### Validation in `__post_init__`
 
@@ -136,8 +138,8 @@ def __post_init__(self):
     if self.teacher_model_names_or_paths is not None and len(self.teacher_model_names_or_paths) == 0:
         raise ValueError("teacher_model_names_or_paths must contain at least one teacher model when provided.")
 
-    if self.teacher_aggregation not in ["uniform", "static_weighted"]:
-        raise ValueError("teacher_aggregation must be one of ['uniform', 'static_weighted'].")
+    if self.teacher_aggregation not in ["uniform", "static_weighted", "confidence_weighted"]:
+        raise ValueError("teacher_aggregation must be one of ['uniform', 'static_weighted', 'confidence_weighted'].")
 
     if self.teacher_weights is not None:
         if self.teacher_model_names_or_paths is not None and len(self.teacher_weights) != len(
@@ -369,7 +371,7 @@ Code:
 
 ```python
 def _normalize_teacher_weights(self, teacher_weights: list[float] | None) -> torch.Tensor:
-    if self.teacher_aggregation == "uniform" or teacher_weights is None:
+    if self.teacher_aggregation != "static_weighted" or teacher_weights is None:
         normalized_teacher_weights = torch.ones(len(self.teacher_models), dtype=torch.float32)
     else:
         normalized_teacher_weights = torch.tensor(teacher_weights, dtype=torch.float32)
@@ -378,7 +380,7 @@ def _normalize_teacher_weights(self, teacher_weights: list[float] | None) -> tor
 
 What it does:
 
-- if uniform fusion is selected, give every teacher the same weight
+- if uniform or confidence-weighted fusion is selected, initialize every teacher with the same base weight
 - if static weighted fusion is selected, use the provided list
 - normalize the vector so the weights sum to 1
 
@@ -440,7 +442,7 @@ It does three things:
 
 1. run every teacher on the same sequence
 2. extract teacher distributions on the generated region only
-3. fuse those teacher distributions with static weights without stacking all teachers at once
+3. fuse those teacher distributions with static or adaptive token weights without stacking all teachers at once
 
 Per-teacher forward pass:
 
@@ -482,11 +484,24 @@ Meaning:
 - this gives the fused teacher distribution in log-probability space
 - return per-teacher scalar diagnostics and the fused log-probs for the loss
 
+For `teacher_aggregation="confidence_weighted"`, the method first collects only selected-token log-probabilities for
+each teacher. These small tensors are used to compute per-token teacher weights with:
+
+```python
+teacher_scores = 1 / (-selected_teacher_log_probs + 1e-8)
+log_teacher_token_weights = F.log_softmax(teacher_scores, dim=0)
+```
+
+It then makes a second streaming pass over the teachers and fuses each full-vocabulary distribution with that teacher's
+per-token dynamic weights. This keeps the implementation faithful to the thesis Eq. 14 while preserving the memory-safe
+streaming aggregation design.
+
 This streaming aggregation is mathematically equivalent to stacking teachers and applying `logsumexp` over the teacher
 axis, but it avoids materializing a `[num_teachers, batch_size, sequence_length, vocab_size]` tensor. This matters for
 large-vocabulary multi-teacher runs where the stacked teacher tensor can dominate memory usage.
 
-This is the exact Phase 1 multi-teacher idea: static fusion in probability space.
+For `uniform` and `static_weighted`, this is the exact Phase 1 multi-teacher idea: static fusion in probability space.
+For `confidence_weighted`, this becomes Phase 3A adaptive fusion while keeping the same fused-teacher JSD objective.
 
 ### `compute_loss(...)`
 
@@ -740,16 +755,17 @@ Fused-teacher metrics are logged with keys of the form `fused/...`:
 These diagnostics are useful before introducing adaptive teacher routing. They show whether teachers agree, whether the
 fused target is sharp or noisy, and whether the static weights are producing a meaningful supervision signal.
 
-## Uniform vs static-weighted ablations
+## Aggregation ablations
 
-The current trainer supports two static aggregation modes:
+The current trainer supports two static aggregation modes and one adaptive aggregation mode:
 
 - `teacher_aggregation="uniform"`: all teachers receive equal weight. This is the Phase 1 baseline and corresponds to a naive ensemble target.
 - `teacher_aggregation="static_weighted"`: teachers receive fixed user-provided weights through `teacher_weights`.
+- `teacher_aggregation="confidence_weighted"`: teachers receive token-level dynamic weights using the selected-token inverse-NLL confidence formula from the thesis document.
 
 These settings should be treated as ablations. `uniform` answers whether simple multi-teacher fusion helps at all,
-whereas `static_weighted` tests whether prior knowledge about teacher quality or domain relevance improves the fused
-target before adding adaptive token-level routing.
+`static_weighted` tests whether prior knowledge about teacher quality or domain relevance improves the fused target,
+and `confidence_weighted` tests whether token-level expert confidence improves over static fusion.
 
 ## End-to-end flow
 
@@ -771,8 +787,7 @@ The complete Phase 1 training logic is:
 
 This document describes the current code, which still has some intentional limitations:
 
-- only static aggregation is implemented
-- no adaptive token-level routing yet
+- `confidence_weighted` adaptive routing is implemented; `max_margin` is still pending
 - no heterogeneous tokenizer support yet
 - fused-teacher generation currently recomputes each teacher on the full prefix each decoding step
 - `_paper` metadata in the trainer is still incomplete
