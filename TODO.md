@@ -62,17 +62,27 @@
 
 ## Phase 3: Adaptive Token-Level Aggregation
 
-- [ ] Add config options for adaptive aggregation
-- [ ] Add `confidence_weighted` teacher routing first
-- [ ] Implement `confidence_weighted` with the thesis formula `C_k = 1 / (-log P_Tk(y_t | x) + eps)` and `softmax(C_k)` over teachers
-- [ ] Add tests showing `confidence_weighted` favors the teacher with higher selected-token confidence
-- [ ] Preserve streaming aggregation for adaptive modes; do not stack `[num_teachers, batch_size, sequence_length, vocab_size]`
-- [ ] Update `_aggregate_teacher_log_probs(...)` for dynamic per-token weights
-- [ ] Add tests proving `uniform` and `static_weighted` behavior remains unchanged after adaptive changes
+- [x] Add config options for adaptive aggregation
+- [x] Add `confidence_weighted` teacher routing first
+- [x] Implement `confidence_weighted` with the thesis formula `C_k = 1 / (-log P_Tk(y_t | x) + eps)` and `softmax(C_k)` over teachers
+- [x] Add tests showing `confidence_weighted` favors the teacher with higher selected-token confidence
+- [x] Preserve streaming aggregation for adaptive modes; do not stack `[num_teachers, batch_size, sequence_length, vocab_size]`
+- [x] Update `_aggregate_teacher_log_probs(...)` for dynamic per-token weights
+- [x] Add tests proving `uniform` and `static_weighted` behavior remains unchanged after adaptive changes
 - [ ] Add `max_margin` teacher routing after `confidence_weighted` is stable
 - [ ] Implement `max_margin` with the thesis formula `argmax_k abs(P_Tk(y_t | x) - Q(y_t | x))`
 - [ ] Pass student selected-token probabilities into the aggregation path for `max_margin`
 - [ ] Add tests showing `max_margin` selects the teacher with largest teacher-student selected-token probability gap
+- [ ] Add FuseLLM-style `min_ce` teacher routing
+- [ ] Implement `min_ce` as sequence-level teacher selection by lowest average selected-token CE
+- [ ] Add FuseLLM-style `avg_ce` teacher routing
+- [ ] Implement `avg_ce` as sequence-level weighted fusion using CE-derived teacher rewards
+- [ ] Add tests showing `min_ce` selects the lowest-CE teacher per example
+- [ ] Add tests showing `avg_ce` gives larger sequence-level weights to lower-CE teachers
+- [ ] Add `domain_routed` teacher routing
+- [ ] Preserve dataset `domain` metadata through prompt-completion preparation and collation
+- [ ] Implement initial domain mapping for `general`, `math`, and `code`
+- [ ] Add tests showing `domain_routed` selects the expected teacher for each domain
 - [ ] Add docs for adaptive aggregation modes
 
 ## Phase 4: Advanced Thesis Extensions

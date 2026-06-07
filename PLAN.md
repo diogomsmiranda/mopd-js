@@ -337,14 +337,24 @@ Extend same files, no new abstraction layer.
 Add config options:
 - `teacher_aggregation = "confidence_weighted"`
 - `teacher_aggregation = "max_margin"`
+- `teacher_aggregation = "min_ce"`
+- `teacher_aggregation = "avg_ce"`
+- `teacher_aggregation = "domain_routed"`
 
 Add trainer methods:
-- `_compute_teacher_token_weights(...)`
 - `_aggregate_teacher_log_probs(...)` updated for dynamic per-token weights
 
 Implementation order:
 - Phase 3A: implement `confidence_weighted` first
 - Phase 3B: implement `max_margin` after the confidence-weighted path is stable
+- Phase 3C: implement FuseLLM-style CE aggregation with `min_ce` and `avg_ce`
+- Phase 3D: implement dataset-domain routing with `domain_routed`
+
+Status:
+- [x] Phase 3A: `confidence_weighted`
+- [ ] Phase 3B: `max_margin`
+- [ ] Phase 3C: `min_ce` and `avg_ce`
+- [ ] Phase 3D: `domain_routed`
 
 `confidence_weighted` definition from the thesis document:
 - use selected-token teacher confidence, not entropy, as the primary implementation
@@ -360,6 +370,19 @@ Implementation order:
   - `margin_k = abs(P_Tk(y_t | x) - Q(y_t | x))`
   - `pi_k = 1` for the teacher with the largest margin and `0` for all others
 - this path requires student selected-token probabilities in the aggregation path
+
+FuseLLM-style CE aggregation definitions:
+- use the source-model cross-entropy against the selected supervised/generated tokens as a sequence-level quality score
+- compute one average CE per teacher and example over valid target tokens
+- `min_ce` selects the teacher distribution with the lowest sequence-level CE for that example
+- `avg_ce` computes a weighted average of teacher distributions using FuseLLM-style rewards, where lower CE produces a larger reward
+- these are online, shared-tokenizer adaptations of FuseLLM's fusion functions; heterogeneous tokenizer alignment remains deferred to Phase 5
+
+Domain-routed aggregation definition:
+- use a dataset-provided `domain` field to choose the teacher for each example
+- expected initial domains are `general`, `math`, and `code`
+- initial routing should map `general` to the instruction/general teacher, `math` to the math teacher, and `code` to the coder teacher
+- this requires preserving the `domain` column through prompt-completion preparation and collation
 
 Memory requirement:
 - preserve the streaming aggregation design
@@ -485,22 +508,27 @@ Primary question:
 ### Experiment 5: Adaptive Aggregation With Fused-Teacher JSD
 
 Goal:
-- implement and evaluate token-level teacher routing while keeping the current fused-teacher objective
+- implement and evaluate adaptive teacher routing while keeping the current fused-teacher objective
 
 Setup:
 - add adaptive `teacher_aggregation` modes:
   - `"max_margin"`
   - `"confidence_weighted"`
+  - `"min_ce"`
+  - `"avg_ce"`
+  - `"domain_routed"`
 - objective: fused-teacher JSD
-- apply dynamic teacher weights per token before constructing the fused teacher distribution
+- apply dynamic teacher weights before constructing the fused teacher distribution
 
 Primary question:
-- does token-level teacher weighting outperform uniform/static fusion by prioritizing the most relevant expert?
+- does adaptive teacher weighting outperform uniform/static fusion by prioritizing the most relevant expert?
 
 Implementation note:
 - `confidence_weighted` should follow the thesis formula: `C_k = 1 / (-log P_Tk(y_t | x) + eps)`, then `softmax(C_k)` over teachers
 - `max_margin` should follow the thesis formula: winner-takes-all on `abs(P_Tk(y_t | x) - Q(y_t | x))`
 - `max_margin` requires student selected-token probabilities in the aggregation path
+- `min_ce` and `avg_ce` should follow FuseLLM's sequence-level CE scoring rather than token-level routing
+- `domain_routed` should use the dataset domain metadata to avoid off-domain teacher noise
 - adaptive aggregation must preserve streaming full-vocabulary fusion to avoid multi-teacher OOMs
 
 ### Experiment 6: Multi-Distribution Consensus Objective
