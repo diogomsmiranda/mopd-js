@@ -352,7 +352,7 @@ Implementation order:
 
 Status:
 - [x] Phase 3A: `confidence_weighted`
-- [ ] Phase 3B: `max_margin`
+- [x] Phase 3B: `max_margin`
 - [ ] Phase 3C: `min_ce` and `avg_ce`
 - [ ] Phase 3D: `domain_routed`
 
