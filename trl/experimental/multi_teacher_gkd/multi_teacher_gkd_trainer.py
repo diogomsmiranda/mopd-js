@@ -409,9 +409,15 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         # Apply reduction
         return jsd.sum() / mask.sum() if labels is not None else jsd.sum() / jsd.size(0)
 
-    def _aggregate_teacher_log_probs(self, input_ids, attention_mask, prompt_lengths, shifted_labels=None):
-        if self.teacher_aggregation == "confidence_weighted" and shifted_labels is None:
-            raise ValueError("shifted_labels must be provided when teacher_aggregation='confidence_weighted'.")
+    def _aggregate_teacher_log_probs(
+        self, input_ids, attention_mask, prompt_lengths, shifted_labels=None, shifted_student_log_probs=None
+    ):
+        if self.teacher_aggregation in ["confidence_weighted", "max_margin"] and shifted_labels is None:
+            raise ValueError(
+                f"shifted_labels must be provided when teacher_aggregation='{self.teacher_aggregation}'."
+            )
+        if self.teacher_aggregation == "max_margin" and shifted_student_log_probs is None:
+            raise ValueError("shifted_student_log_probs must be provided when teacher_aggregation='max_margin'.")
 
         teacher_metrics = []
         aggregated_teacher_log_probs = None
@@ -452,11 +458,11 @@ class MultiTeacherGKDTrainer(SFTTrainer):
                 )
                 if self.teacher_aggregation in ["static_weighted", "uniform"]:
                     teacher_metrics[-1]["weight"] = teacher_weights[teacher_idx].item()
-                else:
+                elif self.teacher_aggregation in ["confidence_weighted", "max_margin"]:
                     selected_teacher_log_probs.append(selected_log_probs)
                 del teacher_probs, selected_log_probs, entropy, confidence
 
-            if self.teacher_aggregation != "confidence_weighted":
+            if self.teacher_aggregation not in ["confidence_weighted", "max_margin"]:
                 # Aggregate the teacher distributions in probability space.
                 teacher_weight = teacher_weights[teacher_idx].to(dtype=teacher_log_probs.dtype).log()
                 teacher_log_probs.add_(teacher_weight)
@@ -466,15 +472,31 @@ class MultiTeacherGKDTrainer(SFTTrainer):
                     aggregated_teacher_log_probs = torch.logaddexp(aggregated_teacher_log_probs, teacher_log_probs)
             del teacher_log_probs
 
-        if self.teacher_aggregation == "confidence_weighted":
-            # Eq. (14) in the document: C_k = 1 / (-log P_Tk(y_t | x) + eps), then softmax over teachers.
+        if self.teacher_aggregation in ["confidence_weighted", "max_margin"]:
             selected_teacher_log_probs = torch.stack(selected_teacher_log_probs, dim=0)
-            teacher_scores = 1 / (-selected_teacher_log_probs + 1e-8)
-            log_teacher_token_weights = F.log_softmax(teacher_scores, dim=0)
+            if self.teacher_aggregation == "confidence_weighted":
+                # Eq. (14) in the document: C_k = 1 / (-log P_Tk(y_t | x) + eps), then softmax over teachers.
+                teacher_scores = 1 / (-selected_teacher_log_probs + 1e-8)
+                log_teacher_token_weights = F.log_softmax(teacher_scores, dim=0)
+                del teacher_scores
+            else:
+                # Max-margin routing: select the teacher with the largest selected-token probability gap to the student.
+                student_selected_log_probs = shifted_student_log_probs.gather(
+                    -1, safe_labels.unsqueeze(-1)
+                ).squeeze(-1)
+                teacher_scores = (
+                    selected_teacher_log_probs.exp() - student_selected_log_probs.exp().unsqueeze(0)
+                ).abs()
+                selected_teacher_indices = teacher_scores.argmax(dim=0)
+                teacher_token_weights = F.one_hot(
+                    selected_teacher_indices, num_classes=len(self.teacher_models)
+                ).permute(2, 0, 1)
+                log_teacher_token_weights = teacher_token_weights.to(dtype=selected_teacher_log_probs.dtype).log()
+                del student_selected_log_probs, teacher_scores, selected_teacher_indices
             teacher_token_weights = log_teacher_token_weights.exp()
             for teacher_idx, teacher_metrics_i in enumerate(teacher_metrics):
                 teacher_metrics_i["weight"] = masked_mean(teacher_token_weights[teacher_idx]).item()
-            del selected_teacher_log_probs, teacher_scores, teacher_token_weights
+            del selected_teacher_log_probs, teacher_token_weights
 
             for teacher_idx, teacher_model in enumerate(self.teacher_models):
                 # compute teacher output in eval mode
@@ -550,6 +572,7 @@ class MultiTeacherGKDTrainer(SFTTrainer):
             attention_mask=inputs["attention_mask"],
             prompt_lengths=prompt_lengths,
             shifted_labels=shifted_labels,
+            shifted_student_log_probs=shifted_student_log_probs,
         )
 
         self._log_distribution_metrics(teacher_metrics, aggregated_teacher_log_probs, shifted_labels)
