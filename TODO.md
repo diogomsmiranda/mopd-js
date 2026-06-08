@@ -60,7 +60,7 @@
 - [x] Add trainer tests for metric logging
 - [x] Extend docs with ablation guidance and experiment notes
 
-## Phase 3: Adaptive Token-Level Aggregation
+## Phase 3: Adaptive Teacher Aggregation
 
 - [x] Add config options for adaptive aggregation
 - [x] Add `confidence_weighted` teacher routing first
@@ -73,17 +73,18 @@
 - [x] Implement `max_margin` with the thesis formula `argmax_k abs(P_Tk(y_t | x) - Q(y_t | x))`
 - [x] Pass student selected-token probabilities into the aggregation path for `max_margin`
 - [x] Add tests showing `max_margin` selects the teacher with largest teacher-student selected-token probability gap
-- [ ] Add FuseLLM-style `min_ce` teacher routing
-- [ ] Implement `min_ce` as sequence-level teacher selection by lowest average selected-token CE
-- [ ] Add FuseLLM-style `avg_ce` teacher routing
-- [ ] Implement `avg_ce` as sequence-level weighted fusion using CE-derived teacher rewards
-- [ ] Add tests showing `min_ce` selects the lowest-CE teacher per example
-- [ ] Add tests showing `avg_ce` gives larger sequence-level weights to lower-CE teachers
+- [x] Add FuseLLM-style `min_ce` teacher routing
+- [x] Implement `min_ce` as sequence-level teacher selection by lowest average selected-token CE
+- [x] Add FuseLLM-style `avg_ce` teacher routing
+- [x] Implement `avg_ce` as sequence-level weighted fusion using CE-derived teacher rewards
+- [x] Add tests showing `min_ce` selects the lowest-CE teacher per example
+- [x] Add tests showing `avg_ce` gives larger sequence-level weights to lower-CE teachers
 - [ ] Add `domain_routed` teacher routing
 - [ ] Preserve dataset `domain` metadata through prompt-completion preparation and collation
 - [ ] Implement initial domain mapping for `general`, `math`, and `code`
 - [ ] Add tests showing `domain_routed` selects the expected teacher for each domain
-- [ ] Add docs for adaptive aggregation modes
+- [x] Add docs for implemented adaptive aggregation modes
+- [ ] Add docs for `domain_routed` after implementation
 
 ## Phase 4: Advanced Thesis Extensions
 
