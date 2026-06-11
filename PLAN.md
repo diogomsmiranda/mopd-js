@@ -354,7 +354,7 @@ Status:
 - [x] Phase 3A: `confidence_weighted`
 - [x] Phase 3B: `max_margin`
 - [x] Phase 3C: `min_ce` and `avg_ce`
-- [ ] Phase 3D: `domain_routed`
+- [x] Phase 3D: `domain_routed`
 
 `confidence_weighted` definition from the thesis document:
 - use selected-token teacher confidence, not entropy, as the primary implementation

@@ -148,6 +148,7 @@ class DataCollatorForChatML:
         prompts_input_ids = []
         prompt_attention_mask = []
         labels = []
+        domains = []
 
         for example in examples:
             formatted_prompt = example.get(self.prompt_key, None)
@@ -237,6 +238,8 @@ class DataCollatorForChatML:
             completion_start_idx = len(current_prompt_ids)
             label[completion_start_idx:] = input_ids[-1][completion_start_idx:]
             labels.append(label)
+            if "domain" in example:
+                domains.append(example["domain"])
 
         # convert to list of tensors and pad
         input_ids = [torch.tensor(ids, dtype=torch.long) for ids in input_ids]
@@ -251,13 +254,16 @@ class DataCollatorForChatML:
         prompts_input_ids = pad(prompts_input_ids, padding_side="left", padding_value=self.tokenizer.pad_token_id)
         prompt_attention_mask = pad(prompt_attention_mask, padding_side="left", padding_value=0)
 
-        return {
+        batch = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "labels": labels,
             "prompts": prompts_input_ids,
             "prompt_attention_mask": prompt_attention_mask,
         }
+        if domains:
+            batch["domain"] = domains
+        return batch
 
 
 def truncate_right(

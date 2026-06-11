@@ -164,11 +164,14 @@ class MultiTeacherGKDTrainer(SFTTrainer):
                     completion_ids = []
 
             input_ids = prompt_ids + completion_ids
-            return {
+            tokenized = {
                 "input_ids": input_ids,
                 "attention_mask": [1] * len(input_ids),
                 "prompts": prompt_ids,
             }
+            if "domain" in example:
+                tokenized["domain"] = example["domain"]
+            return tokenized
 
         with PartialState().main_process_first():
             return dataset.map(
@@ -410,15 +413,36 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         return jsd.sum() / mask.sum() if labels is not None else jsd.sum() / jsd.size(0)
 
     def _aggregate_teacher_log_probs(
-        self, input_ids, attention_mask, prompt_lengths, shifted_labels=None, shifted_student_log_probs=None
+        self,
+        input_ids,
+        attention_mask,
+        prompt_lengths,
+        shifted_labels=None,
+        shifted_student_log_probs=None,
+        domains=None,
     ):
-        adaptive_aggregations = ["confidence_weighted", "max_margin", "min_ce", "avg_ce"]
-        if self.teacher_aggregation in adaptive_aggregations and shifted_labels is None:
+        scored_adaptive_aggregations = ["confidence_weighted", "max_margin", "min_ce", "avg_ce"]
+        label_required_aggregations = scored_adaptive_aggregations + ["domain_routed"]
+        if self.teacher_aggregation in label_required_aggregations and shifted_labels is None:
             raise ValueError(
                 f"shifted_labels must be provided when teacher_aggregation='{self.teacher_aggregation}'."
             )
         if self.teacher_aggregation == "max_margin" and shifted_student_log_probs is None:
             raise ValueError("shifted_student_log_probs must be provided when teacher_aggregation='max_margin'.")
+        if self.teacher_aggregation == "domain_routed":
+            if domains is None:
+                raise ValueError("domains must be provided when teacher_aggregation='domain_routed'.")
+            if len(self.teacher_models) < 3:
+                raise ValueError("domain_routed requires at least 3 teacher models for general, math, and code domains.")
+            if len(domains) != input_ids.size(0):
+                raise ValueError("domains must have the same length as the input batch.")
+            domain_to_teacher_idx = {"general": 0, "math": 1, "code": 2}
+            for domain in domains:
+                if domain not in domain_to_teacher_idx:
+                    raise ValueError(
+                        f"Unknown domain '{domain}' for teacher_aggregation='domain_routed'. Expected one of "
+                        f"{list(domain_to_teacher_idx)}."
+                    )
 
         teacher_metrics = []
         aggregated_teacher_log_probs = None
@@ -433,6 +457,21 @@ class MultiTeacherGKDTrainer(SFTTrainer):
 
         def masked_mean(values):
             return values[valid_mask].mean() if valid_mask is not None and valid_mask.any() else values.new_tensor(0.0)
+
+        domain_log_teacher_token_weights = None
+        domain_teacher_token_weights = None
+        if self.teacher_aggregation == "domain_routed":
+            selected_teacher_indices = [domain_to_teacher_idx[domain] for domain in domains]
+            selected_teacher_indices = torch.tensor(selected_teacher_indices, device=input_ids.device)
+            domain_teacher_token_weights = F.one_hot(
+                selected_teacher_indices, num_classes=len(self.teacher_models)
+            ).permute(1, 0)
+            domain_log_teacher_token_weights = domain_teacher_token_weights.to(dtype=torch.float32).log()
+            domain_log_teacher_token_weights = domain_log_teacher_token_weights.unsqueeze(-1).expand(
+                -1, -1, shifted_labels.size(1)
+            )
+            domain_teacher_token_weights = domain_log_teacher_token_weights.exp()
+            del selected_teacher_indices
 
         for teacher_idx, teacher_model in enumerate(self.teacher_models):
             # compute teacher output in eval mode
@@ -459,21 +498,28 @@ class MultiTeacherGKDTrainer(SFTTrainer):
                 )
                 if self.teacher_aggregation in ["static_weighted", "uniform"]:
                     teacher_metrics[-1]["weight"] = teacher_weights[teacher_idx].item()
-                elif self.teacher_aggregation in adaptive_aggregations:
+                elif self.teacher_aggregation in scored_adaptive_aggregations:
                     selected_teacher_log_probs.append(selected_log_probs)
+                elif self.teacher_aggregation == "domain_routed":
+                    teacher_metrics[-1]["weight"] = masked_mean(domain_teacher_token_weights[teacher_idx]).item()
                 del teacher_probs, selected_log_probs, entropy, confidence
 
-            if self.teacher_aggregation not in adaptive_aggregations:
+            if self.teacher_aggregation not in scored_adaptive_aggregations:
                 # Aggregate the teacher distributions in probability space.
-                teacher_weight = teacher_weights[teacher_idx].to(dtype=teacher_log_probs.dtype).log()
-                teacher_log_probs.add_(teacher_weight)
+                if self.teacher_aggregation == "domain_routed":
+                    teacher_log_probs.add_(
+                        domain_log_teacher_token_weights[teacher_idx].unsqueeze(-1).to(teacher_log_probs.dtype)
+                    )
+                else:
+                    teacher_weight = teacher_weights[teacher_idx].to(dtype=teacher_log_probs.dtype).log()
+                    teacher_log_probs.add_(teacher_weight)
                 if aggregated_teacher_log_probs is None:
                     aggregated_teacher_log_probs = teacher_log_probs
                 else:
                     aggregated_teacher_log_probs = torch.logaddexp(aggregated_teacher_log_probs, teacher_log_probs)
             del teacher_log_probs
 
-        if self.teacher_aggregation in adaptive_aggregations:
+        if self.teacher_aggregation in scored_adaptive_aggregations:
             selected_teacher_log_probs = torch.stack(selected_teacher_log_probs, dim=0)
             if self.teacher_aggregation == "confidence_weighted":
                 # Eq. (14) in the document: C_k = 1 / (-log P_Tk(y_t | x) + eps), then softmax over teachers.
@@ -494,7 +540,7 @@ class MultiTeacherGKDTrainer(SFTTrainer):
                 ).permute(2, 0, 1)
                 log_teacher_token_weights = teacher_token_weights.to(dtype=selected_teacher_log_probs.dtype).log()
                 del student_selected_log_probs, teacher_scores, selected_teacher_indices
-            else:
+            elif self.teacher_aggregation in ["min_ce", "avg_ce"]:
                 valid_mask_f = valid_mask.to(dtype=selected_teacher_log_probs.dtype)
                 valid_counts = valid_mask_f.sum(dim=-1).clamp(min=1)
                 teacher_scores = -(selected_teacher_log_probs * valid_mask_f.unsqueeze(0)).sum(
@@ -538,6 +584,7 @@ class MultiTeacherGKDTrainer(SFTTrainer):
                     aggregated_teacher_log_probs = torch.logaddexp(aggregated_teacher_log_probs, teacher_log_probs)
                 del teacher_log_probs
             del log_teacher_token_weights
+        del domain_log_teacher_token_weights, domain_teacher_token_weights
 
         return teacher_metrics, aggregated_teacher_log_probs
 
@@ -593,6 +640,7 @@ class MultiTeacherGKDTrainer(SFTTrainer):
             prompt_lengths=prompt_lengths,
             shifted_labels=shifted_labels,
             shifted_student_log_probs=shifted_student_log_probs,
+            domains=inputs.get("domain"),
         )
 
         self._log_distribution_metrics(teacher_metrics, aggregated_teacher_log_probs, shifted_labels)

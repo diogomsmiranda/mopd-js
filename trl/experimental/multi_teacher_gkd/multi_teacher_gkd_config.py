@@ -34,7 +34,7 @@ class MultiTeacherGKDConfig(GKDConfig):
             Static weights used to aggregate the teacher distributions. If `None`, uniform weights are used.
         teacher_aggregation (`str`, *optional*, defaults to `"uniform"`):
             Strategy used to aggregate teacher distributions. Supported values are `"uniform"`, `"static_weighted"`,
-            `"confidence_weighted"`, `"max_margin"`, `"min_ce"`, and `"avg_ce"`.
+            `"confidence_weighted"`, `"max_margin"`, `"min_ce"`, `"avg_ce"`, and `"domain_routed"`.
     """
 
     teacher_model_names_or_paths: list[str] | None = field(
@@ -49,7 +49,7 @@ class MultiTeacherGKDConfig(GKDConfig):
         default="uniform",
         metadata={
             "help": "Strategy used to aggregate teacher distributions. Supported values are 'uniform', "
-            "'static_weighted', 'confidence_weighted', 'max_margin', 'min_ce', and 'avg_ce'."
+            "'static_weighted', 'confidence_weighted', 'max_margin', 'min_ce', 'avg_ce', and 'domain_routed'."
         },
     )
 
@@ -66,10 +66,12 @@ class MultiTeacherGKDConfig(GKDConfig):
             "max_margin",
             "min_ce",
             "avg_ce",
+            "domain_routed",
         ]:
             raise ValueError(
                 "teacher_aggregation must be one of "
-                "['uniform', 'static_weighted', 'confidence_weighted', 'max_margin', 'min_ce', 'avg_ce']."
+                "['uniform', 'static_weighted', 'confidence_weighted', 'max_margin', 'min_ce', 'avg_ce', "
+                "'domain_routed']."
             )
 
         if self.teacher_weights is not None:

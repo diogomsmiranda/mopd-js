@@ -111,7 +111,7 @@ teacher_aggregation: str = field(
     default="uniform",
     metadata={
         "help": "Strategy used to aggregate teacher distributions. Supported values are 'uniform', "
-        "'static_weighted', 'confidence_weighted', 'max_margin', 'min_ce', and 'avg_ce'."
+        "'static_weighted', 'confidence_weighted', 'max_margin', 'min_ce', 'avg_ce', and 'domain_routed'."
     },
 )
 ```
@@ -126,6 +126,7 @@ What it means:
   - `"max_margin"`
   - `"min_ce"`
   - `"avg_ce"`
+  - `"domain_routed"`
 
 `confidence_weighted` is the Phase 3A adaptive routing mode. It uses the thesis confidence formula based on the
 selected supervised/generated token: `C_k = 1 / (-log P_Tk(y_t | x) + eps)`, followed by a softmax over teachers.
@@ -136,6 +137,10 @@ teacher and the student, `abs(P_Tk(y_t | x) - Q(y_t | x))`, and routes each toke
 `min_ce` and `avg_ce` are Phase 3C FuseLLM-style routing modes. They compute one average cross-entropy score per
 teacher and example over valid supervised/generated tokens. `min_ce` selects the lowest-CE teacher for the whole
 example, while `avg_ce` computes CE-derived sequence-level teacher weights.
+
+`domain_routed` is the Phase 3D metadata-based routing mode. It routes each example to one teacher according to the
+dataset `domain` field with the initial fixed mapping `general -> teacher 0`, `math -> teacher 1`, and
+`code -> teacher 2`.
 
 ### Validation in `__post_init__`
 
@@ -148,10 +153,10 @@ def __post_init__(self):
     if self.teacher_model_names_or_paths is not None and len(self.teacher_model_names_or_paths) == 0:
         raise ValueError("teacher_model_names_or_paths must contain at least one teacher model when provided.")
 
-    if self.teacher_aggregation not in ["uniform", "static_weighted", "confidence_weighted", "max_margin", "min_ce", "avg_ce"]:
+    if self.teacher_aggregation not in ["uniform", "static_weighted", "confidence_weighted", "max_margin", "min_ce", "avg_ce", "domain_routed"]:
         raise ValueError(
             "teacher_aggregation must be one of "
-            "['uniform', 'static_weighted', 'confidence_weighted', 'max_margin', 'min_ce', 'avg_ce']."
+            "['uniform', 'static_weighted', 'confidence_weighted', 'max_margin', 'min_ce', 'avg_ce', 'domain_routed']."
         )
 
     if self.teacher_weights is not None:
@@ -534,13 +539,19 @@ the FuseLLM-style reward shape by computing `reward_k = 1 / exp(CE_k)` and apply
 or weighted teacher distribution is then applied in the second streaming pass, so full-vocabulary teacher tensors are
 still processed one teacher at a time.
 
+For `teacher_aggregation="domain_routed"`, the method uses the batch `domain` values instead of a score pass. The fixed
+initial mapping is `general -> teacher 0`, `math -> teacher 1`, and `code -> teacher 2`. Each example receives a
+sequence-level one-hot teacher weight, and the full-vocabulary distribution is fused during the first teacher pass
+because those weights are known before teacher scoring. This mode requires the dataset `domain` metadata to survive
+prompt-completion tokenization and collation.
+
 This streaming aggregation is mathematically equivalent to stacking teachers and applying `logsumexp` over the teacher
 axis, but it avoids materializing a `[num_teachers, batch_size, sequence_length, vocab_size]` tensor. This matters for
 large-vocabulary multi-teacher runs where the stacked teacher tensor can dominate memory usage.
 
 For `uniform` and `static_weighted`, this is the exact Phase 1 multi-teacher idea: static fusion in probability space.
-For `confidence_weighted`, `max_margin`, `min_ce`, and `avg_ce`, this becomes adaptive fusion while keeping the same
-fused-teacher JSD objective.
+For `confidence_weighted`, `max_margin`, `min_ce`, `avg_ce`, and `domain_routed`, this becomes adaptive fusion while
+keeping the same fused-teacher JSD objective.
 
 ### `compute_loss(...)`
 
@@ -796,7 +807,7 @@ fused target is sharp or noisy, and whether the static weights are producing a m
 
 ## Aggregation ablations
 
-The current trainer supports two static aggregation modes and four adaptive aggregation modes:
+The current trainer supports two static aggregation modes and five adaptive aggregation modes:
 
 - `teacher_aggregation="uniform"`: all teachers receive equal weight. This is the Phase 1 baseline and corresponds to a naive ensemble target.
 - `teacher_aggregation="static_weighted"`: teachers receive fixed user-provided weights through `teacher_weights`.
@@ -804,13 +815,15 @@ The current trainer supports two static aggregation modes and four adaptive aggr
 - `teacher_aggregation="max_margin"`: each token is routed to the teacher with the largest selected-token probability gap from the student.
 - `teacher_aggregation="min_ce"`: each example is routed to the teacher with the lowest average CE over valid target tokens.
 - `teacher_aggregation="avg_ce"`: each example uses a FuseLLM-style weighted average based on CE-derived teacher rewards.
+- `teacher_aggregation="domain_routed"`: each example is routed by dataset metadata using `general -> teacher 0`, `math -> teacher 1`, and `code -> teacher 2`.
 
 These settings should be treated as ablations. `uniform` answers whether simple multi-teacher fusion helps at all,
 `static_weighted` tests whether prior knowledge about teacher quality or domain relevance improves the fused target,
 `confidence_weighted` tests whether token-level expert confidence improves over static fusion, and `max_margin` tests
 whether routing toward the teacher with the largest teacher-student gap provides a stronger corrective signal. `min_ce`
 and `avg_ce` test whether FuseLLM-style sequence-level teacher quality is a better routing signal than token-level
-confidence or margin.
+confidence or margin. `domain_routed` tests whether preserving known task-domain specialization is better than dynamic
+token or sequence scoring.
 
 ## End-to-end flow
 
@@ -832,7 +845,7 @@ The complete Phase 1 training logic is:
 
 This document describes the current code, which still has some intentional limitations:
 
-- `confidence_weighted`, `max_margin`, `min_ce`, and `avg_ce` adaptive routing are implemented; `domain_routed` is still pending
+- `domain_routed` currently uses a fixed three-domain teacher mapping rather than a configurable router
 - no heterogeneous tokenizer support yet
 - fused-teacher generation currently recomputes each teacher on the full prefix each decoding step
 - `_paper` metadata in the trainer is still incomplete
