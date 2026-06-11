@@ -79,12 +79,12 @@
 - [x] Implement `avg_ce` as sequence-level weighted fusion using CE-derived teacher rewards
 - [x] Add tests showing `min_ce` selects the lowest-CE teacher per example
 - [x] Add tests showing `avg_ce` gives larger sequence-level weights to lower-CE teachers
-- [ ] Add `domain_routed` teacher routing
-- [ ] Preserve dataset `domain` metadata through prompt-completion preparation and collation
-- [ ] Implement initial domain mapping for `general`, `math`, and `code`
-- [ ] Add tests showing `domain_routed` selects the expected teacher for each domain
+- [x] Add `domain_routed` teacher routing
+- [x] Preserve dataset `domain` metadata through prompt-completion preparation and collation
+- [x] Implement initial domain mapping for `general`, `math`, and `code`
+- [x] Add tests showing `domain_routed` selects the expected teacher for each domain
 - [x] Add docs for implemented adaptive aggregation modes
-- [ ] Add docs for `domain_routed` after implementation
+- [x] Add docs for `domain_routed` after implementation
 
 ## Phase 4: Advanced Thesis Extensions
 

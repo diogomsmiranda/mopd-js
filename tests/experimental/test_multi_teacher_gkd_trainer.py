@@ -291,6 +291,14 @@ class TestMultiTeacherGKDConfig(TrlTestCase):
         )
         assert training_args.teacher_aggregation == "avg_ce"
 
+        training_args = MultiTeacherGKDConfig(
+            output_dir=self.tmp_dir,
+            bf16=False,
+            teacher_model_names_or_paths=model_ids,
+            teacher_aggregation="domain_routed",
+        )
+        assert training_args.teacher_aggregation == "domain_routed"
+
         with pytest.raises(ValueError, match="teacher_model_names_or_paths must contain at least one teacher model"):
             MultiTeacherGKDConfig(
                 output_dir=self.tmp_dir,
@@ -432,6 +440,30 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         labels = batch["labels"][0]
         assert labels[:prompt_length].eq(-100).all()
         assert labels[prompt_length:].ne(-100).any()
+
+    def test_prompt_completion_dataset_preserves_domain(self):
+        training_args = MultiTeacherGKDConfig(
+            output_dir=self.tmp_dir,
+            bf16=False,
+            max_length=16,
+            report_to="none",
+        )
+        dataset = Dataset.from_dict(
+            {
+                "prompt": ["Question: 1+1? Answer:"],
+                "completion": [" 2"],
+                "domain": ["math"],
+            }
+        )
+
+        prepared_dataset = MultiTeacherGKDTrainer._prepare_prompt_completion_dataset(
+            dataset, self.tokenizer, training_args, "train"
+        )
+        data_collator = DataCollatorForChatML(tokenizer=self.tokenizer, max_length=training_args.max_length)
+        batch = data_collator([prepared_dataset[0]])
+
+        assert prepared_dataset[0]["domain"] == "math"
+        assert batch["domain"] == ["math"]
 
     def test_instantiated_teacher_models(self):
         training_args = MultiTeacherGKDConfig(
@@ -907,6 +939,96 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         assert teacher_metrics[0]["weight"] > teacher_metrics[1]["weight"]
         assert teacher_metrics[0]["weight"] == pytest.approx(teacher_weights[0].item())
         assert teacher_metrics[1]["weight"] == pytest.approx(teacher_weights[1].item())
+
+    def test_aggregate_teacher_log_probs_domain_routed(self):
+        class DummyTeacherModel:
+            def __init__(self, logits):
+                self.logits = logits
+
+            def eval(self):
+                return self
+
+            def __call__(self, input_ids, attention_mask):
+                return SimpleNamespace(logits=self.logits)
+
+        teacher_1_probs = torch.tensor([0.8, 0.1, 0.1])
+        teacher_2_probs = torch.tensor([0.1, 0.8, 0.1])
+        teacher_3_probs = torch.tensor([0.1, 0.1, 0.8])
+        teacher_1_logits = torch.log(teacher_1_probs).view(1, 1, 3).repeat(3, 2, 1)
+        teacher_2_logits = torch.log(teacher_2_probs).view(1, 1, 3).repeat(3, 2, 1)
+        teacher_3_logits = torch.log(teacher_3_probs).view(1, 1, 3).repeat(3, 2, 1)
+
+        trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
+        trainer.teacher_aggregation = "domain_routed"
+        trainer.teacher_models = [
+            DummyTeacherModel(teacher_1_logits),
+            DummyTeacherModel(teacher_2_logits),
+            DummyTeacherModel(teacher_3_logits),
+        ]
+        trainer.teacher_weights = torch.tensor([1 / 3, 1 / 3, 1 / 3])
+        trainer.temperature = 1.0
+
+        teacher_metrics, aggregated_teacher_log_probs = trainer._aggregate_teacher_log_probs(
+            input_ids=torch.ones(3, 2, dtype=torch.long),
+            attention_mask=torch.ones(3, 2, dtype=torch.long),
+            prompt_lengths=1,
+            shifted_labels=torch.tensor([[0], [1], [2]]),
+            domains=["general", "math", "code"],
+        )
+
+        expected_teacher_log_probs = torch.log(torch.stack([teacher_1_probs, teacher_2_probs, teacher_3_probs])).view(
+            3, 1, 3
+        )
+
+        torch.testing.assert_close(aggregated_teacher_log_probs, expected_teacher_log_probs)
+        assert teacher_metrics[0]["weight"] == pytest.approx(1 / 3)
+        assert teacher_metrics[1]["weight"] == pytest.approx(1 / 3)
+        assert teacher_metrics[2]["weight"] == pytest.approx(1 / 3)
+
+    def test_aggregate_teacher_log_probs_domain_routed_requires_domains(self):
+        trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
+        trainer.teacher_aggregation = "domain_routed"
+        trainer.teacher_models = [torch.nn.Linear(1, 1), torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)]
+
+        with pytest.raises(ValueError, match="domains must be provided"):
+            trainer._aggregate_teacher_log_probs(
+                input_ids=torch.ones(1, 2, dtype=torch.long),
+                attention_mask=torch.ones(1, 2, dtype=torch.long),
+                prompt_lengths=1,
+                shifted_labels=torch.tensor([[0]]),
+            )
+
+    def test_aggregate_teacher_log_probs_domain_routed_rejects_unknown_domain(self):
+        class DummyTeacherModel:
+            def __init__(self, logits):
+                self.logits = logits
+
+            def eval(self):
+                return self
+
+            def __call__(self, input_ids, attention_mask):
+                return SimpleNamespace(logits=self.logits)
+
+        teacher_probs = torch.tensor([0.8, 0.1, 0.1])
+        teacher_logits = torch.log(teacher_probs).view(1, 1, 3).repeat(1, 2, 1)
+        trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
+        trainer.teacher_aggregation = "domain_routed"
+        trainer.teacher_models = [
+            DummyTeacherModel(teacher_logits),
+            DummyTeacherModel(teacher_logits),
+            DummyTeacherModel(teacher_logits),
+        ]
+        trainer.teacher_weights = torch.tensor([1 / 3, 1 / 3, 1 / 3])
+        trainer.temperature = 1.0
+
+        with pytest.raises(ValueError, match="Unknown domain"):
+            trainer._aggregate_teacher_log_probs(
+                input_ids=torch.ones(1, 2, dtype=torch.long),
+                attention_mask=torch.ones(1, 2, dtype=torch.long),
+                prompt_lengths=1,
+                shifted_labels=torch.tensor([[0]]),
+                domains=["science"],
+            )
 
     def test_aggregate_teacher_log_probs_min_ce_requires_labels(self):
         trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
