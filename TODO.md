@@ -94,6 +94,26 @@
 - [ ] Add fused-teacher vs consensus objective ablation
 - [ ] Add adaptive-routing vs Multi-Consensus ablation
 
+## Experiment And Evaluation Tracking
+
+- [x] Add Slurm wrapper for domain-filtered single-teacher GKD baselines
+- [x] Add dataset splitting script for `general`, `math`, and `code` domain subsets
+- [x] Add single-teacher eval wrappers for instruct/general, math/math, and coder/code baselines
+- [x] Update eval defaults to cover `no_chat`, `code`, `chat_hellaswag`, and `chat_ifeval`
+- [x] Document dataset provenance, domain counts, split sizes, and length statistics
+- [x] Evaluate `domain_routed` and `min_ce` off-policy (`lmbda=0.0`) ablations
+- [x] Evaluate domain-filtered single-teacher GKD baselines
+- [x] Inspect local W&B logs for MT-GKD and single-GKD training-curve diagnostics
+- [x] Update result interpretation so `Specialist Rel.` tracks GSM8K/math, HumanEval/code, and general-core retention
+- [ ] Evaluate intermediate checkpoints for weak single-teacher math/code runs before trying longer training
+- [ ] Add an explicit `instruct` domain to the dataset if IFEval becomes a primary specialist metric
+- [x] Audit `BAAI/Infinity-Instruct` `Gen` labels with `mopd-slurm/audit_infinity_instruct.py` before reconstructing the dataset
+- [x] Add exact `ability_en` / `cate_ability_en` filters for the clean `instruct` domain rebuild
+- [ ] Reconstruct the Qwen3 teacher dataset from source with `instruct`, `math`, and `code` domains
+- [ ] Run a targeted `max_length=2048` ablation for math/code specialist transfer if checkpoint diagnostics justify it
+- [ ] Rebuild result tables after any new checkpoint or length-ablation evals
+- [ ] Use denser eval/checkpointing for future diagnostic runs: `eval_steps=100`, `save_steps=100`, `save_total_limit=6`
+
 ## Phase 5: Heterogeneous Teachers And Hybrids
 
 - [ ] Investigate heterogeneous tokenizer support

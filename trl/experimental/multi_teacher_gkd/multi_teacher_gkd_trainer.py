@@ -433,10 +433,10 @@ class MultiTeacherGKDTrainer(SFTTrainer):
             if domains is None:
                 raise ValueError("domains must be provided when teacher_aggregation='domain_routed'.")
             if len(self.teacher_models) < 3:
-                raise ValueError("domain_routed requires at least 3 teacher models for general, math, and code domains.")
+                raise ValueError("domain_routed requires at least 3 teacher models for instruct/general, math, and code domains.")
             if len(domains) != input_ids.size(0):
                 raise ValueError("domains must have the same length as the input batch.")
-            domain_to_teacher_idx = {"general": 0, "math": 1, "code": 2}
+            domain_to_teacher_idx = {"instruct": 0, "general": 0, "math": 1, "code": 2}
             for domain in domains:
                 if domain not in domain_to_teacher_idx:
                     raise ValueError(

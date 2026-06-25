@@ -973,7 +973,7 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
             attention_mask=torch.ones(3, 2, dtype=torch.long),
             prompt_lengths=1,
             shifted_labels=torch.tensor([[0], [1], [2]]),
-            domains=["general", "math", "code"],
+            domains=["instruct", "math", "code"],
         )
 
         expected_teacher_log_probs = torch.log(torch.stack([teacher_1_probs, teacher_2_probs, teacher_3_probs])).view(
@@ -984,6 +984,44 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         assert teacher_metrics[0]["weight"] == pytest.approx(1 / 3)
         assert teacher_metrics[1]["weight"] == pytest.approx(1 / 3)
         assert teacher_metrics[2]["weight"] == pytest.approx(1 / 3)
+
+    def test_aggregate_teacher_log_probs_domain_routed_accepts_legacy_general(self):
+        class DummyTeacherModel:
+            def __init__(self, logits):
+                self.logits = logits
+
+            def eval(self):
+                return self
+
+            def __call__(self, input_ids, attention_mask):
+                return SimpleNamespace(logits=self.logits)
+
+        teacher_1_probs = torch.tensor([0.8, 0.1, 0.1])
+        teacher_2_probs = torch.tensor([0.1, 0.8, 0.1])
+        teacher_3_probs = torch.tensor([0.1, 0.1, 0.8])
+        teacher_1_logits = torch.log(teacher_1_probs).view(1, 1, 3).repeat(1, 2, 1)
+        teacher_2_logits = torch.log(teacher_2_probs).view(1, 1, 3).repeat(1, 2, 1)
+        teacher_3_logits = torch.log(teacher_3_probs).view(1, 1, 3).repeat(1, 2, 1)
+
+        trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
+        trainer.teacher_aggregation = "domain_routed"
+        trainer.teacher_models = [
+            DummyTeacherModel(teacher_1_logits),
+            DummyTeacherModel(teacher_2_logits),
+            DummyTeacherModel(teacher_3_logits),
+        ]
+        trainer.teacher_weights = torch.tensor([1 / 3, 1 / 3, 1 / 3])
+        trainer.temperature = 1.0
+
+        _, aggregated_teacher_log_probs = trainer._aggregate_teacher_log_probs(
+            input_ids=torch.ones(1, 2, dtype=torch.long),
+            attention_mask=torch.ones(1, 2, dtype=torch.long),
+            prompt_lengths=1,
+            shifted_labels=torch.tensor([[0]]),
+            domains=["general"],
+        )
+
+        torch.testing.assert_close(aggregated_teacher_log_probs, torch.log(teacher_1_probs).view(1, 1, 3))
 
     def test_aggregate_teacher_log_probs_domain_routed_requires_domains(self):
         trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)

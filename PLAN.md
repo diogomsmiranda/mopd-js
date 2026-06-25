@@ -6,6 +6,21 @@
 - [x] Phase 1 point 2: create `trl/experimental/multi_teacher_gkd/multi_teacher_gkd_config.py`
 - [x] Phase 1 point 3: create `trl/experimental/multi_teacher_gkd/multi_teacher_gkd_trainer.py`
 - [x] Phase 1 point 4: add `tests/experimental/test_multi_teacher_gkd_trainer.py`
+- [x] Phase 2: add thesis-specific diagnostics, metric logging, and ablation docs
+- [x] Phase 3A: add `confidence_weighted` adaptive aggregation
+- [x] Phase 3B: add `max_margin` adaptive aggregation
+- [x] Phase 3C: add FuseLLM-style `min_ce` and `avg_ce` aggregation
+- [x] Phase 3D: add dataset-domain routing with `domain_routed`
+
+## Current Experiment Status
+
+- The strongest completed MT-GKD method so far is `min_ce` with `lmbda=0.9`.
+- `domain_routed` and `min_ce` off-policy ablations with `lmbda=0.0` have been added and evaluated.
+- `max_margin` currently acts as a negative ablation: it is implemented, but its measured results are weak.
+- Domain-filtered single-teacher GKD baselines have been added for instruct/general, math/math, and coder/code.
+- Single-teacher math and coder baselines show weak specialist transfer so far; evaluate intermediate checkpoints before increasing epochs again.
+- The current dataset has `general`, `math`, and `code` domains, but no explicit `instruct` domain. Treat IFEval as diagnostic until an instruction-following domain is added.
+- Eval wrappers now cover `no_chat`, `code`, `chat_hellaswag`, and `chat_ifeval` modes for a single student checkpoint path.
 
 ## Goal
 
@@ -36,9 +51,11 @@ Target the specialized-track setup first:
 Defer to later phases:
 
 - heterogeneous tokenizers
-- adaptive token-level routing
 - N-way consensus JSD
 - hybrid GRPO-style scalar reward functions
+
+Status update:
+- adaptive teacher routing is no longer deferred; `confidence_weighted`, `max_margin`, `min_ce`, `avg_ce`, and `domain_routed` are implemented.
 
 ## Exact Files To Add
 
