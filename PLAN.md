@@ -11,12 +11,14 @@
 - [x] Phase 3B: add `max_margin` adaptive aggregation
 - [x] Phase 3C: add FuseLLM-style `min_ce` and `avg_ce` aggregation
 - [x] Phase 3D: add dataset-domain routing with `domain_routed`
+- [x] Phase 4: add `multi_consensus` loss objective alongside `fused_jsd`
 
 ## Current Experiment Status
 
 - The strongest completed MT-GKD method so far is `min_ce` with `lmbda=0.9`.
 - `domain_routed` and `min_ce` off-policy ablations with `lmbda=0.0` have been added and evaluated.
 - `max_margin` currently acts as a negative ablation: it is implemented, but its measured results are weak.
+- `multi_consensus` is implemented as an objective ablation for `uniform`, `confidence_weighted`, `min_ce`, `avg_ce`, and `domain_routed`.
 - Domain-filtered single-teacher GKD baselines have been added for instruct/general, math/math, and coder/code.
 - Single-teacher math and coder baselines show weak specialist transfer so far; evaluate intermediate checkpoints before increasing epochs again.
 - The current dataset has `general`, `math`, and `code` domains, but no explicit `instruct` domain. Treat IFEval as diagnostic until an instruction-following domain is added.
@@ -56,6 +58,7 @@ Defer to later phases:
 
 Status update:
 - adaptive teacher routing is no longer deferred; `confidence_weighted`, `max_margin`, `min_ce`, `avg_ce`, and `domain_routed` are implemented.
+- N-way consensus JSD is no longer deferred; `loss_type="multi_consensus"` is implemented for objective ablations against the default `loss_type="fused_jsd"`.
 
 ## Exact Files To Add
 

@@ -257,6 +257,7 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         self.beta = args.beta
         self.temperature = args.temperature
         self.seq_kd = args.seq_kd
+        self.loss_type = args.loss_type
 
         generation_kwargs = {
             "max_new_tokens": args.max_new_tokens,
@@ -420,6 +421,7 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         shifted_labels=None,
         shifted_student_log_probs=None,
         domains=None,
+        return_teacher_token_weights=False,
     ):
         scored_adaptive_aggregations = ["confidence_weighted", "max_margin", "min_ce", "avg_ce"]
         label_required_aggregations = scored_adaptive_aggregations + ["domain_routed"]
@@ -448,6 +450,7 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         aggregated_teacher_log_probs = None
         teacher_weights = self.teacher_weights.to(device=input_ids.device)
         selected_teacher_log_probs = []
+        log_teacher_token_weights = None
 
         valid_mask = None
         safe_labels = None
@@ -471,7 +474,12 @@ class MultiTeacherGKDTrainer(SFTTrainer):
                 -1, -1, shifted_labels.size(1)
             )
             domain_teacher_token_weights = domain_log_teacher_token_weights.exp()
+            log_teacher_token_weights = domain_log_teacher_token_weights
             del selected_teacher_indices
+        elif self.teacher_aggregation not in scored_adaptive_aggregations:
+            log_teacher_token_weights = teacher_weights.log().view(-1, 1, 1).expand(
+                -1, input_ids.size(0), input_ids.size(1) - prompt_lengths
+            )
 
         for teacher_idx, teacher_model in enumerate(self.teacher_models):
             # compute teacher output in eval mode
@@ -506,13 +514,9 @@ class MultiTeacherGKDTrainer(SFTTrainer):
 
             if self.teacher_aggregation not in scored_adaptive_aggregations:
                 # Aggregate the teacher distributions in probability space.
-                if self.teacher_aggregation == "domain_routed":
-                    teacher_log_probs.add_(
-                        domain_log_teacher_token_weights[teacher_idx].unsqueeze(-1).to(teacher_log_probs.dtype)
-                    )
-                else:
-                    teacher_weight = teacher_weights[teacher_idx].to(dtype=teacher_log_probs.dtype).log()
-                    teacher_log_probs.add_(teacher_weight)
+                teacher_log_probs.add_(
+                    log_teacher_token_weights[teacher_idx].unsqueeze(-1).to(teacher_log_probs.dtype)
+                )
                 if aggregated_teacher_log_probs is None:
                     aggregated_teacher_log_probs = teacher_log_probs
                 else:
@@ -583,10 +587,76 @@ class MultiTeacherGKDTrainer(SFTTrainer):
                 else:
                     aggregated_teacher_log_probs = torch.logaddexp(aggregated_teacher_log_probs, teacher_log_probs)
                 del teacher_log_probs
-            del log_teacher_token_weights
         del domain_log_teacher_token_weights, domain_teacher_token_weights
 
+        if return_teacher_token_weights:
+            return teacher_metrics, aggregated_teacher_log_probs, log_teacher_token_weights
         return teacher_metrics, aggregated_teacher_log_probs
+
+    def _multi_consensus_loss_from_log_probs(
+        self,
+        student_log_probs,
+        fused_teacher_log_probs,
+        log_teacher_token_weights,
+        input_ids,
+        attention_mask,
+        prompt_lengths,
+        labels,
+    ):
+        valid_mask = labels != -100
+        num_tokens = valid_mask.sum()
+        if num_tokens == 0:
+            return student_log_probs.sum() * 0.0
+
+        beta = torch.tensor(self.beta, dtype=student_log_probs.dtype, device=student_log_probs.device)
+        if self.beta == 0:
+            return student_log_probs.sum() * 0.0
+        if self.beta == 1:
+            mixture_log_probs = fused_teacher_log_probs
+        else:
+            mixture_log_probs = torch.logaddexp(
+                student_log_probs + torch.log1p(-beta), fused_teacher_log_probs + torch.log(beta)
+            )
+
+        valid_positions = valid_mask.reshape(-1).nonzero().flatten()
+        seq_length = valid_mask.size(1)
+        loss = student_log_probs.new_tensor(0.0)
+        chunk_size = 64
+        if self.beta != 1:
+            for start in range(0, valid_positions.size(0), chunk_size):
+                end = start + chunk_size
+                chunk_positions = valid_positions[start:end]
+                batch_positions = chunk_positions // seq_length
+                token_positions = chunk_positions % seq_length
+                student_log_probs_chunk = student_log_probs[batch_positions, token_positions]
+                mixture_log_probs_chunk = mixture_log_probs[batch_positions, token_positions]
+                loss = loss + (1 - beta) * F.kl_div(
+                    mixture_log_probs_chunk, student_log_probs_chunk, reduction="sum", log_target=True
+                )
+
+        for teacher_idx, teacher_model in enumerate(self.teacher_models):
+            teacher_model.eval()
+            with torch.no_grad():
+                teacher_outputs = teacher_model(input_ids=input_ids, attention_mask=attention_mask)
+            shifted_teacher_logits = teacher_outputs.logits[:, prompt_lengths - 1 : -1, :] / self.temperature
+            teacher_log_probs = F.log_softmax(shifted_teacher_logits, dim=-1)
+            del teacher_outputs, shifted_teacher_logits
+
+            for start in range(0, valid_positions.size(0), chunk_size):
+                end = start + chunk_size
+                chunk_positions = valid_positions[start:end]
+                batch_positions = chunk_positions // seq_length
+                token_positions = chunk_positions % seq_length
+                teacher_log_probs_chunk = teacher_log_probs[batch_positions, token_positions]
+                mixture_log_probs_chunk = mixture_log_probs[batch_positions, token_positions]
+                teacher_kl = F.kl_div(
+                    mixture_log_probs_chunk, teacher_log_probs_chunk, reduction="none", log_target=True
+                ).sum(dim=-1)
+                teacher_token_weights = log_teacher_token_weights[teacher_idx, batch_positions, token_positions].exp()
+                loss = loss + beta * (teacher_token_weights.to(teacher_kl.dtype) * teacher_kl).sum()
+            del teacher_log_probs
+
+        return loss / num_tokens
 
     def _log_distribution_metrics(self, teacher_metrics, fused_teacher_log_probs, shifted_labels):
         mode = "train" if self.model.training else "eval"
@@ -634,24 +704,48 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         gathered_num_target_tokens = self.accelerator.gather(num_target_tokens)
         self._metrics[mode]["target_tokens"].append(gathered_num_target_tokens.float().mean().item())
         self._metrics[mode]["empty_target_batches"].append((gathered_num_target_tokens == 0).float().mean().item())
-        teacher_metrics, aggregated_teacher_log_probs = self._aggregate_teacher_log_probs(
-            input_ids=inputs["input_ids"],
-            attention_mask=inputs["attention_mask"],
-            prompt_lengths=prompt_lengths,
-            shifted_labels=shifted_labels,
-            shifted_student_log_probs=shifted_student_log_probs,
-            domains=inputs.get("domain"),
-        )
+        if self.loss_type == "multi_consensus":
+            teacher_metrics, aggregated_teacher_log_probs, log_teacher_token_weights = (
+                self._aggregate_teacher_log_probs(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs["attention_mask"],
+                    prompt_lengths=prompt_lengths,
+                    shifted_labels=shifted_labels,
+                    shifted_student_log_probs=shifted_student_log_probs,
+                    domains=inputs.get("domain"),
+                    return_teacher_token_weights=True,
+                )
+            )
+        else:
+            teacher_metrics, aggregated_teacher_log_probs = self._aggregate_teacher_log_probs(
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                prompt_lengths=prompt_lengths,
+                shifted_labels=shifted_labels,
+                shifted_student_log_probs=shifted_student_log_probs,
+                domains=inputs.get("domain"),
+            )
 
         self._log_distribution_metrics(teacher_metrics, aggregated_teacher_log_probs, shifted_labels)
 
         # compute loss
-        loss = self.generalized_jsd_loss_from_log_probs(
-            student_log_probs=shifted_student_log_probs,
-            teacher_log_probs=aggregated_teacher_log_probs,
-            labels=shifted_labels,
-            beta=self.beta,
-        )
+        if self.loss_type == "multi_consensus":
+            loss = self._multi_consensus_loss_from_log_probs(
+                student_log_probs=shifted_student_log_probs,
+                fused_teacher_log_probs=aggregated_teacher_log_probs,
+                log_teacher_token_weights=log_teacher_token_weights,
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs["attention_mask"],
+                prompt_lengths=prompt_lengths,
+                labels=shifted_labels,
+            )
+        else:
+            loss = self.generalized_jsd_loss_from_log_probs(
+                student_log_probs=shifted_student_log_probs,
+                teacher_log_probs=aggregated_teacher_log_probs,
+                labels=shifted_labels,
+                beta=self.beta,
+            )
 
         # empty cache
         empty_cache()

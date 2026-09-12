@@ -142,6 +142,21 @@ example, while `avg_ce` computes CE-derived sequence-level teacher weights.
 dataset `domain` field with the initial fixed mapping `general -> teacher 0`, `math -> teacher 1`, and
 `code -> teacher 2`.
 
+#### `loss_type`
+
+```python
+loss_type: str = field(
+    default="fused_jsd",
+    metadata={"help": "Loss objective used for multi-teacher distillation."},
+)
+```
+
+What it means:
+
+- `"fused_jsd"` keeps the existing behavior: teachers are fused into one probability distribution, then the student is trained against that fused target.
+- `"multi_consensus"` keeps the same teacher weights from `teacher_aggregation`, but applies the teacher-side KL to each teacher separately before weighting and summing the teacher KL terms.
+- this makes objective ablations possible for `uniform`, `confidence_weighted`, `min_ce`, `avg_ce`, and `domain_routed` without changing the routing modes themselves.
+
 ### Validation in `__post_init__`
 
 Code:
@@ -159,6 +174,9 @@ def __post_init__(self):
             "['uniform', 'static_weighted', 'confidence_weighted', 'max_margin', 'min_ce', 'avg_ce', 'domain_routed']."
         )
 
+    if self.loss_type not in ["fused_jsd", "multi_consensus"]:
+        raise ValueError("loss_type must be one of ['fused_jsd', 'multi_consensus'].")
+
     if self.teacher_weights is not None:
         if self.teacher_model_names_or_paths is not None and len(self.teacher_weights) != len(
             self.teacher_model_names_or_paths
@@ -172,6 +190,7 @@ Why it exists:
 
 - rejects an explicitly empty teacher checkpoint list
 - prevents unsupported aggregation modes
+- prevents unsupported loss objectives
 - ensures static weights are aligned with the teacher checkpoint list when checkpoint names are configured
 - ensures the weight vector is meaningful
 
@@ -550,8 +569,41 @@ axis, but it avoids materializing a `[num_teachers, batch_size, sequence_length,
 large-vocabulary multi-teacher runs where the stacked teacher tensor can dominate memory usage.
 
 For `uniform` and `static_weighted`, this is the exact Phase 1 multi-teacher idea: static fusion in probability space.
-For `confidence_weighted`, `max_margin`, `min_ce`, `avg_ce`, and `domain_routed`, this becomes adaptive fusion while
-keeping the same fused-teacher JSD objective.
+For `confidence_weighted`, `max_margin`, `min_ce`, `avg_ce`, and `domain_routed`, this becomes adaptive fusion. The
+resulting teacher weights are reused by both `loss_type="fused_jsd"` and `loss_type="multi_consensus"`.
+
+### `_multi_consensus_loss_from_log_probs(...)`
+
+Code shape:
+
+```python
+def _multi_consensus_loss_from_log_probs(
+    self,
+    student_log_probs,
+    fused_teacher_log_probs,
+    log_teacher_token_weights,
+    input_ids,
+    attention_mask,
+    prompt_lengths,
+    labels,
+):
+```
+
+This is the Phase 4 objective ablation. It uses the same mixture distribution as fused JSD:
+
+```python
+M = (1 - beta) * Q_student + beta * P_fused_teacher
+```
+
+But instead of computing one teacher KL from the fused teacher distribution, it computes a weighted consensus term over
+the individual teachers:
+
+```python
+loss = (1 - beta) * KL(Q_student || M) + beta * sum_k w_k * KL(P_teacher_k || M)
+```
+
+This keeps the existing aggregation modes comparable while testing whether teacher disagreement should be preserved in
+the loss instead of collapsed before the KL term.
 
 ### `compute_loss(...)`
 
@@ -593,7 +645,7 @@ teacher_metrics, aggregated_teacher_log_probs = self._aggregate_teacher_log_prob
 self._log_distribution_metrics(teacher_metrics, aggregated_teacher_log_probs, shifted_labels)
 ```
 
-Then it computes the final distillation loss:
+Then it computes the final distillation loss. With the default `loss_type="fused_jsd"`:
 
 ```python
 loss = self.generalized_jsd_loss_from_log_probs(
@@ -604,12 +656,15 @@ loss = self.generalized_jsd_loss_from_log_probs(
 )
 ```
 
+With `loss_type="multi_consensus"`, the trainer requests the per-teacher token weights from aggregation and computes the
+N-way consensus loss against the same mixture distribution.
+
 So the complete logic is:
 
 - student predicts distribution
 - each teacher predicts distribution
-- teachers are fused
-- student is trained against the fused teacher target
+- teachers are fused and diagnostics are logged
+- student is trained against either the fused teacher target or the weighted multi-teacher consensus objective
 
 ### `generate_on_policy_outputs(...)`
 

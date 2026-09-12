@@ -259,6 +259,22 @@ class TestMultiTeacherGKDConfig(TrlTestCase):
                 teacher_aggregation="unsupported",
             )
 
+        with pytest.raises(ValueError, match="loss_type must be one of"):
+            MultiTeacherGKDConfig(
+                output_dir=self.tmp_dir,
+                bf16=False,
+                teacher_model_names_or_paths=model_ids,
+                loss_type="unsupported",
+            )
+
+        training_args = MultiTeacherGKDConfig(
+            output_dir=self.tmp_dir,
+            bf16=False,
+            teacher_model_names_or_paths=model_ids,
+            loss_type="multi_consensus",
+        )
+        assert training_args.loss_type == "multi_consensus"
+
         training_args = MultiTeacherGKDConfig(
             output_dir=self.tmp_dir,
             bf16=False,
@@ -762,6 +778,51 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         assert teacher_metrics[1]["confidence"] == pytest.approx(teacher_2_probs.max().item())
         assert teacher_metrics[0]["weight"] == pytest.approx(teacher_weights[0].item())
         assert teacher_metrics[1]["weight"] == pytest.approx(teacher_weights[1].item())
+
+    def test_multi_consensus_loss_matches_weighted_teacher_kl(self):
+        class DummyTeacherModel:
+            def __init__(self, logits):
+                self.logits = logits
+
+            def eval(self):
+                return self
+
+            def __call__(self, input_ids, attention_mask):
+                return SimpleNamespace(logits=self.logits)
+
+        student_probs = torch.tensor([0.5, 0.3, 0.2])
+        teacher_1_probs = torch.tensor([0.8, 0.1, 0.1])
+        teacher_2_probs = torch.tensor([0.1, 0.8, 0.1])
+        teacher_weights = torch.tensor([0.25, 0.75])
+        fused_teacher_probs = teacher_weights[0] * teacher_1_probs + teacher_weights[1] * teacher_2_probs
+        mixture_probs = 0.5 * student_probs + 0.5 * fused_teacher_probs
+
+        teacher_1_logits = torch.log(teacher_1_probs).view(1, 1, 3).repeat(1, 2, 1)
+        teacher_2_logits = torch.log(teacher_2_probs).view(1, 1, 3).repeat(1, 2, 1)
+
+        trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
+        trainer.beta = 0.5
+        trainer.temperature = 1.0
+        trainer.teacher_models = [DummyTeacherModel(teacher_1_logits), DummyTeacherModel(teacher_2_logits)]
+
+        loss = trainer._multi_consensus_loss_from_log_probs(
+            student_log_probs=torch.log(student_probs).view(1, 1, 3),
+            fused_teacher_log_probs=torch.log(fused_teacher_probs).view(1, 1, 3),
+            log_teacher_token_weights=torch.log(teacher_weights).view(2, 1, 1),
+            input_ids=torch.ones(1, 2, dtype=torch.long),
+            attention_mask=torch.ones(1, 2, dtype=torch.long),
+            prompt_lengths=1,
+            labels=torch.tensor([[0]]),
+        )
+        expected_loss = 0.5 * (student_probs * (student_probs.log() - mixture_probs.log())).sum()
+        expected_loss = expected_loss + 0.5 * teacher_weights[0] * (
+            teacher_1_probs * (teacher_1_probs.log() - mixture_probs.log())
+        ).sum()
+        expected_loss = expected_loss + 0.5 * teacher_weights[1] * (
+            teacher_2_probs * (teacher_2_probs.log() - mixture_probs.log())
+        ).sum()
+
+        torch.testing.assert_close(loss, expected_loss)
 
     def test_aggregate_teacher_log_probs_confidence_weighted(self):
         class DummyTeacherModel:

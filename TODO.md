@@ -88,11 +88,12 @@
 
 ## Phase 4: Advanced Thesis Extensions
 
-- [ ] Add Multi-Consensus loss objective
-- [ ] Add config option for `fused_jsd` vs `multi_consensus`
-- [ ] Implement N-way consensus loss over teacher/student distributions
-- [ ] Add fused-teacher vs consensus objective ablation
-- [ ] Add adaptive-routing vs Multi-Consensus ablation
+- [x] Add Multi-Consensus loss objective
+- [x] Add config option for `fused_jsd` vs `multi_consensus`
+- [x] Implement N-way consensus loss over teacher/student distributions
+- [ ] Run fused-teacher vs consensus objective ablation
+- [ ] Run adaptive-routing vs Multi-Consensus ablation
+- [ ] Compare `multi_consensus` with `uniform`, `confidence_weighted`, `min_ce`, `avg_ce`, and `domain_routed`
 
 ## Experiment And Evaluation Tracking
 

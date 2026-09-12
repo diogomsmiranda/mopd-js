@@ -35,6 +35,9 @@ class MultiTeacherGKDConfig(GKDConfig):
         teacher_aggregation (`str`, *optional*, defaults to `"uniform"`):
             Strategy used to aggregate teacher distributions. Supported values are `"uniform"`, `"static_weighted"`,
             `"confidence_weighted"`, `"max_margin"`, `"min_ce"`, `"avg_ce"`, and `"domain_routed"`.
+        loss_type (`str`, *optional*, defaults to `"fused_jsd"`):
+            Loss objective used for multi-teacher distillation. Supported values are `"fused_jsd"` and
+            `"multi_consensus"`.
     """
 
     teacher_model_names_or_paths: list[str] | None = field(
@@ -51,6 +54,10 @@ class MultiTeacherGKDConfig(GKDConfig):
             "help": "Strategy used to aggregate teacher distributions. Supported values are 'uniform', "
             "'static_weighted', 'confidence_weighted', 'max_margin', 'min_ce', 'avg_ce', and 'domain_routed'."
         },
+    )
+    loss_type: str = field(
+        default="fused_jsd",
+        metadata={"help": "Loss objective used for multi-teacher distillation."},
     )
 
     def __post_init__(self):
@@ -73,6 +80,9 @@ class MultiTeacherGKDConfig(GKDConfig):
                 "['uniform', 'static_weighted', 'confidence_weighted', 'max_margin', 'min_ce', 'avg_ce', "
                 "'domain_routed']."
             )
+
+        if self.loss_type not in ["fused_jsd", "multi_consensus"]:
+            raise ValueError("loss_type must be one of ['fused_jsd', 'multi_consensus'].")
 
         if self.teacher_weights is not None:
             if self.teacher_model_names_or_paths is not None and len(self.teacher_weights) != len(
