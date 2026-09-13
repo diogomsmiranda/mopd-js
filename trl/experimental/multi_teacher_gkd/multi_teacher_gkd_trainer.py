@@ -257,7 +257,7 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         self.beta = args.beta
         self.temperature = args.temperature
         self.seq_kd = args.seq_kd
-        self.loss_type = args.loss_type
+        self.kd_loss_type = args.kd_loss_type
 
         generation_kwargs = {
             "max_new_tokens": args.max_new_tokens,
@@ -704,7 +704,7 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         gathered_num_target_tokens = self.accelerator.gather(num_target_tokens)
         self._metrics[mode]["target_tokens"].append(gathered_num_target_tokens.float().mean().item())
         self._metrics[mode]["empty_target_batches"].append((gathered_num_target_tokens == 0).float().mean().item())
-        if self.loss_type == "multi_consensus":
+        if self.kd_loss_type == "multi_consensus":
             teacher_metrics, aggregated_teacher_log_probs, log_teacher_token_weights = (
                 self._aggregate_teacher_log_probs(
                     input_ids=inputs["input_ids"],
@@ -729,7 +729,7 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         self._log_distribution_metrics(teacher_metrics, aggregated_teacher_log_probs, shifted_labels)
 
         # compute loss
-        if self.loss_type == "multi_consensus":
+        if self.kd_loss_type == "multi_consensus":
             loss = self._multi_consensus_loss_from_log_probs(
                 student_log_probs=shifted_student_log_probs,
                 fused_teacher_log_probs=aggregated_teacher_log_probs,

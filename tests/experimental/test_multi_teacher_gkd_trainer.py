@@ -259,21 +259,21 @@ class TestMultiTeacherGKDConfig(TrlTestCase):
                 teacher_aggregation="unsupported",
             )
 
-        with pytest.raises(ValueError, match="loss_type must be one of"):
+        with pytest.raises(ValueError, match="kd_loss_type must be one of"):
             MultiTeacherGKDConfig(
                 output_dir=self.tmp_dir,
                 bf16=False,
                 teacher_model_names_or_paths=model_ids,
-                loss_type="unsupported",
+                kd_loss_type="unsupported",
             )
 
         training_args = MultiTeacherGKDConfig(
             output_dir=self.tmp_dir,
             bf16=False,
             teacher_model_names_or_paths=model_ids,
-            loss_type="multi_consensus",
+            kd_loss_type="multi_consensus",
         )
-        assert training_args.loss_type == "multi_consensus"
+        assert training_args.kd_loss_type == "multi_consensus"
 
         training_args = MultiTeacherGKDConfig(
             output_dir=self.tmp_dir,

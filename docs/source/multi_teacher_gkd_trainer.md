@@ -142,10 +142,10 @@ example, while `avg_ce` computes CE-derived sequence-level teacher weights.
 dataset `domain` field with the initial fixed mapping `general -> teacher 0`, `math -> teacher 1`, and
 `code -> teacher 2`.
 
-#### `loss_type`
+#### `kd_loss_type`
 
 ```python
-loss_type: str = field(
+kd_loss_type: str = field(
     default="fused_jsd",
     metadata={"help": "Loss objective used for multi-teacher distillation."},
 )
@@ -174,8 +174,8 @@ def __post_init__(self):
             "['uniform', 'static_weighted', 'confidence_weighted', 'max_margin', 'min_ce', 'avg_ce', 'domain_routed']."
         )
 
-    if self.loss_type not in ["fused_jsd", "multi_consensus"]:
-        raise ValueError("loss_type must be one of ['fused_jsd', 'multi_consensus'].")
+    if self.kd_loss_type not in ["fused_jsd", "multi_consensus"]:
+        raise ValueError("kd_loss_type must be one of ['fused_jsd', 'multi_consensus'].")
 
     if self.teacher_weights is not None:
         if self.teacher_model_names_or_paths is not None and len(self.teacher_weights) != len(
@@ -570,7 +570,7 @@ large-vocabulary multi-teacher runs where the stacked teacher tensor can dominat
 
 For `uniform` and `static_weighted`, this is the exact Phase 1 multi-teacher idea: static fusion in probability space.
 For `confidence_weighted`, `max_margin`, `min_ce`, `avg_ce`, and `domain_routed`, this becomes adaptive fusion. The
-resulting teacher weights are reused by both `loss_type="fused_jsd"` and `loss_type="multi_consensus"`.
+resulting teacher weights are reused by both `kd_loss_type="fused_jsd"` and `kd_loss_type="multi_consensus"`.
 
 ### `_multi_consensus_loss_from_log_probs(...)`
 
@@ -645,7 +645,7 @@ teacher_metrics, aggregated_teacher_log_probs = self._aggregate_teacher_log_prob
 self._log_distribution_metrics(teacher_metrics, aggregated_teacher_log_probs, shifted_labels)
 ```
 
-Then it computes the final distillation loss. With the default `loss_type="fused_jsd"`:
+Then it computes the final distillation loss. With the default `kd_loss_type="fused_jsd"`:
 
 ```python
 loss = self.generalized_jsd_loss_from_log_probs(
@@ -656,7 +656,7 @@ loss = self.generalized_jsd_loss_from_log_probs(
 )
 ```
 
-With `loss_type="multi_consensus"`, the trainer requests the per-teacher token weights from aggregation and computes the
+With `kd_loss_type="multi_consensus"`, the trainer requests the per-teacher token weights from aggregation and computes the
 N-way consensus loss against the same mixture distribution.
 
 So the complete logic is:

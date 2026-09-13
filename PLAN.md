@@ -58,7 +58,7 @@ Defer to later phases:
 
 Status update:
 - adaptive teacher routing is no longer deferred; `confidence_weighted`, `max_margin`, `min_ce`, `avg_ce`, and `domain_routed` are implemented.
-- N-way consensus JSD is no longer deferred; `loss_type="multi_consensus"` is implemented for objective ablations against the default `loss_type="fused_jsd"`.
+- N-way consensus JSD is no longer deferred; `kd_loss_type="multi_consensus"` is implemented for objective ablations against the default `kd_loss_type="fused_jsd"`.
 
 ## Exact Files To Add
 
@@ -424,7 +424,7 @@ Likely changes:
 - compare fused-teacher supervision against consensus-style supervision in tests and experiments
 
 Suggested work:
-- add `loss_type = "fused_jsd" | "multi_consensus"`
+- add `kd_loss_type = "fused_jsd" | "multi_consensus"`
 - implement an N-way consensus objective over teacher/student distributions
 - add ablations comparing:
   - static fused teacher
@@ -557,7 +557,7 @@ Goal:
 - compare pre-fused teacher supervision against holistic N-way consensus supervision
 
 Setup:
-- add objective selector such as `loss_type="fused_jsd"` or `loss_type="multi_consensus"`
+- add objective selector such as `kd_loss_type="fused_jsd"` or `kd_loss_type="multi_consensus"`
 - keep the same teacher aggregation modes
 - compute a shared mixture over student and all teachers: `M = pi_S * Q + sum_k pi_Tk * P_Tk`
 
