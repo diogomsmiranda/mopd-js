@@ -464,6 +464,11 @@ class MultiTeacherGKDTrainer(SFTTrainer):
             )
         if self.teacher_aggregation == "max_margin" and shifted_student_log_probs is None:
             raise ValueError("shifted_student_log_probs must be provided when teacher_aggregation='max_margin'.")
+        selected_teacher_indices = None
+        if self.teacher_aggregation == "domain_routed":
+            selected_teacher_indices = self._get_domain_teacher_indices(
+                domains, input_ids.size(0), input_ids.device
+            )
         teacher_metrics = []
         aggregated_teacher_log_probs = None
         teacher_weights = self.teacher_weights.to(device=input_ids.device)
@@ -482,9 +487,6 @@ class MultiTeacherGKDTrainer(SFTTrainer):
         domain_log_teacher_token_weights = None
         domain_teacher_token_weights = None
         if self.teacher_aggregation == "domain_routed":
-            selected_teacher_indices = self._get_domain_teacher_indices(
-                domains, input_ids.size(0), input_ids.device
-            )
             domain_teacher_token_weights = F.one_hot(
                 selected_teacher_indices, num_classes=len(self.teacher_models)
             ).permute(1, 0)
