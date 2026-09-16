@@ -1001,16 +1001,38 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         assert teacher_metrics[0]["weight"] == pytest.approx(teacher_weights[0].item())
         assert teacher_metrics[1]["weight"] == pytest.approx(teacher_weights[1].item())
 
+    def test_prepare_domain_routed_teachers_keeps_them_on_cpu(self):
+        trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
+        trainer.teacher_aggregation = "domain_routed"
+        trainer.is_deepspeed_enabled = False
+        trainer.accelerator = SimpleNamespace(
+            prepare_model=lambda *args, **kwargs: pytest.fail("domain teachers must not be accelerator-prepared")
+        )
+        teachers = [torch.nn.Linear(2, 2) for _ in range(3)]
+
+        prepared_teachers = trainer._prepare_teacher_models(teachers, None)
+
+        assert prepared_teachers == teachers
+        assert all(next(teacher.parameters()).device.type == "cpu" for teacher in prepared_teachers)
+        assert all(not parameter.requires_grad for teacher in prepared_teachers for parameter in teacher.parameters())
+
     def test_aggregate_teacher_log_probs_domain_routed(self):
         class DummyTeacherModel:
             def __init__(self, logits):
                 self.logits = logits
+                self.forward_batch_sizes = []
+                self.to_calls = []
 
             def eval(self):
                 return self
 
+            def to(self, device):
+                self.to_calls.append(str(device))
+                return self
+
             def __call__(self, input_ids, attention_mask):
-                return SimpleNamespace(logits=self.logits)
+                self.forward_batch_sizes.append(input_ids.size(0))
+                return SimpleNamespace(logits=self.logits[: input_ids.size(0)])
 
         teacher_1_probs = torch.tensor([0.8, 0.1, 0.1])
         teacher_2_probs = torch.tensor([0.1, 0.8, 0.1])
@@ -1021,13 +1043,15 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
 
         trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
         trainer.teacher_aggregation = "domain_routed"
-        trainer.teacher_models = [
+        teachers = [
             DummyTeacherModel(teacher_1_logits),
             DummyTeacherModel(teacher_2_logits),
             DummyTeacherModel(teacher_3_logits),
         ]
+        trainer.teacher_models = teachers
         trainer.teacher_weights = torch.tensor([1 / 3, 1 / 3, 1 / 3])
         trainer.temperature = 1.0
+        trainer._active_domain_teacher_idx = None
 
         teacher_metrics, aggregated_teacher_log_probs = trainer._aggregate_teacher_log_probs(
             input_ids=torch.ones(3, 2, dtype=torch.long),
@@ -1045,17 +1069,91 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         assert teacher_metrics[0]["weight"] == pytest.approx(1 / 3)
         assert teacher_metrics[1]["weight"] == pytest.approx(1 / 3)
         assert teacher_metrics[2]["weight"] == pytest.approx(1 / 3)
+        assert [teacher.forward_batch_sizes for teacher in teachers] == [[1], [1], [1]]
+
+    def test_activate_domain_teacher_keeps_only_one_teacher_active(self):
+        class DummyTeacherModel:
+            def __init__(self):
+                self.to_calls = []
+
+            def to(self, device):
+                self.to_calls.append(str(device))
+                return self
+
+        teachers = [DummyTeacherModel(), DummyTeacherModel(), DummyTeacherModel()]
+        trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
+        trainer.teacher_models = teachers
+        trainer._active_domain_teacher_idx = None
+
+        trainer._activate_domain_teacher(0, "cuda:0")
+        trainer._activate_domain_teacher(0, "cuda:0")
+        trainer._activate_domain_teacher(2, "cuda:0")
+
+        assert teachers[0].to_calls == ["cuda:0", "cpu"]
+        assert teachers[1].to_calls == []
+        assert teachers[2].to_calls == ["cuda:0"]
+        assert trainer._active_domain_teacher_idx == 2
+
+    def test_generate_from_domain_routed_teachers_only_calls_selected_teachers(self):
+        class DummyTeacherModel:
+            def __init__(self, probabilities):
+                self.logits = probabilities.log()
+                self.forward_batch_sizes = []
+
+            def eval(self):
+                return self
+
+            def to(self, device):
+                return self
+
+            def __call__(self, input_ids, attention_mask):
+                self.forward_batch_sizes.append(input_ids.size(0))
+                logits = self.logits.view(1, 1, -1).expand(input_ids.size(0), input_ids.size(1), -1)
+                return SimpleNamespace(logits=logits)
+
+        teachers = [
+            DummyTeacherModel(torch.tensor([0.8, 0.1, 0.1])),
+            DummyTeacherModel(torch.tensor([0.1, 0.8, 0.1])),
+            DummyTeacherModel(torch.tensor([0.1, 0.1, 0.8])),
+        ]
+        trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
+        trainer.teacher_aggregation = "domain_routed"
+        trainer.teacher_models = teachers
+        trainer._active_domain_teacher_idx = None
+        trainer.generation_config = GenerationConfig(
+            max_new_tokens=1,
+            temperature=1.0,
+            do_sample=False,
+            pad_token_id=None,
+            eos_token_id=None,
+        )
+
+        generated_tokens, _, _ = trainer._generate_from_fused_teachers(
+            {
+                "prompts": torch.ones(2, 1, dtype=torch.long),
+                "prompt_attention_mask": torch.ones(2, 1, dtype=torch.long),
+                "domain": ["instruct", "code"],
+            }
+        )
+
+        assert generated_tokens[:, -1].tolist() == [0, 2]
+        assert [teacher.forward_batch_sizes for teacher in teachers] == [[1], [], [1]]
 
     def test_aggregate_teacher_log_probs_domain_routed_accepts_legacy_general(self):
         class DummyTeacherModel:
             def __init__(self, logits):
                 self.logits = logits
+                self.forward_batch_sizes = []
 
             def eval(self):
                 return self
 
+            def to(self, device):
+                return self
+
             def __call__(self, input_ids, attention_mask):
-                return SimpleNamespace(logits=self.logits)
+                self.forward_batch_sizes.append(input_ids.size(0))
+                return SimpleNamespace(logits=self.logits[: input_ids.size(0)])
 
         teacher_1_probs = torch.tensor([0.8, 0.1, 0.1])
         teacher_2_probs = torch.tensor([0.1, 0.8, 0.1])
@@ -1066,13 +1164,15 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
 
         trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
         trainer.teacher_aggregation = "domain_routed"
-        trainer.teacher_models = [
+        teachers = [
             DummyTeacherModel(teacher_1_logits),
             DummyTeacherModel(teacher_2_logits),
             DummyTeacherModel(teacher_3_logits),
         ]
+        trainer.teacher_models = teachers
         trainer.teacher_weights = torch.tensor([1 / 3, 1 / 3, 1 / 3])
         trainer.temperature = 1.0
+        trainer._active_domain_teacher_idx = None
 
         _, aggregated_teacher_log_probs = trainer._aggregate_teacher_log_probs(
             input_ids=torch.ones(1, 2, dtype=torch.long),
@@ -1083,6 +1183,7 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
         )
 
         torch.testing.assert_close(aggregated_teacher_log_probs, torch.log(teacher_1_probs).view(1, 1, 3))
+        assert [teacher.forward_batch_sizes for teacher in teachers] == [[1], [], []]
 
     def test_aggregate_teacher_log_probs_domain_routed_requires_domains(self):
         trainer = MultiTeacherGKDTrainer.__new__(MultiTeacherGKDTrainer)
