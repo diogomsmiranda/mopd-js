@@ -426,6 +426,23 @@ class TestMultiTeacherGKDTrainer(TrlTestCase):
 
         assert trainer.state.log_history[-1]["train_loss"] is not None
 
+    def test_generation_config_uses_cache_with_gradient_checkpointing(self):
+        training_args = MultiTeacherGKDConfig(
+            output_dir=self.tmp_dir,
+            bf16=False,
+            teacher_model_names_or_paths=[self.model_id],
+            gradient_checkpointing=True,
+            report_to="none",
+        )
+        trainer = MultiTeacherGKDTrainer(
+            model=self.model_id,
+            args=training_args,
+            train_dataset=self._dummy_train_dataset(),
+            processing_class=self.tokenizer,
+        )
+
+        assert trainer.generation_config.use_cache is True
+
     def test_prompt_completion_dataset_preserves_prompt_when_truncated(self):
         training_args = MultiTeacherGKDConfig(
             output_dir=self.tmp_dir,
