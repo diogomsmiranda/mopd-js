@@ -139,7 +139,7 @@ teacher and example over valid supervised/generated tokens. `min_ce` selects the
 example, while `avg_ce` computes CE-derived sequence-level teacher weights.
 
 `domain_routed` is the Phase 3D metadata-based routing mode. It routes each example to one teacher according to the
-dataset `domain` field with the initial fixed mapping `general -> teacher 0`, `math -> teacher 1`, and
+dataset `domain` field with the initial fixed mapping `instruct/general -> teacher 0`, `math -> teacher 1`, and
 `code -> teacher 2`.
 
 ### Validation in `__post_init__`
@@ -540,10 +540,14 @@ or weighted teacher distribution is then applied in the second streaming pass, s
 still processed one teacher at a time.
 
 For `teacher_aggregation="domain_routed"`, the method uses the batch `domain` values instead of a score pass. The fixed
-initial mapping is `general -> teacher 0`, `math -> teacher 1`, and `code -> teacher 2`. Each example receives a
-sequence-level one-hot teacher weight, and the full-vocabulary distribution is fused during the first teacher pass
-because those weights are known before teacher scoring. This mode requires the dataset `domain` metadata to survive
-prompt-completion tokenization and collation.
+initial mapping is `instruct/general -> teacher 0`, `math -> teacher 1`, and `code -> teacher 2`. Each example receives
+a sequence-level one-hot teacher weight. Unlike the fusion modes, domain-routed teachers remain on CPU and use a
+one-entry accelerator cache: when the route changes, the previous teacher is moved back to CPU before the next teacher
+is moved to the accelerator. Each active teacher scores only its routed rows, so a single-domain batch runs one teacher
+forward instead of forwarding every teacher over the full batch. This mode requires the dataset `domain` metadata to
+survive prompt-completion tokenization and collation.
+
+The same routing applies to `seq_kd` generation.
 
 This streaming aggregation is mathematically equivalent to stacking teachers and applying `logsumexp` over the teacher
 axis, but it avoids materializing a `[num_teachers, batch_size, sequence_length, vocab_size]` tensor. This matters for
@@ -815,7 +819,7 @@ The current trainer supports two static aggregation modes and five adaptive aggr
 - `teacher_aggregation="max_margin"`: each token is routed to the teacher with the largest selected-token probability gap from the student.
 - `teacher_aggregation="min_ce"`: each example is routed to the teacher with the lowest average CE over valid target tokens.
 - `teacher_aggregation="avg_ce"`: each example uses a FuseLLM-style weighted average based on CE-derived teacher rewards.
-- `teacher_aggregation="domain_routed"`: each example is routed by dataset metadata using `general -> teacher 0`, `math -> teacher 1`, and `code -> teacher 2`.
+- `teacher_aggregation="domain_routed"`: each example is routed by dataset metadata using `instruct/general -> teacher 0`, `math -> teacher 1`, and `code -> teacher 2`.
 
 These settings should be treated as ablations. `uniform` answers whether simple multi-teacher fusion helps at all,
 `static_weighted` tests whether prior knowledge about teacher quality or domain relevance improves the fused target,
@@ -837,7 +841,7 @@ The complete Phase 1 training logic is:
    - student on-policy rollout with probability `lmbda`
    - otherwise use the collated input
 5. run the student on the final sequence
-6. run all teachers on the same sequence
+6. run all teachers on the same sequence, or only the selected teacher sub-batches for `domain_routed`
 7. fuse teacher distributions in probability space
 8. compute generalized JSD between student and fused teacher
 

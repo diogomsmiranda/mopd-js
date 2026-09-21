@@ -263,7 +263,7 @@ class TestGKDTrainer(TrlTestCase):
         assert trainer.state.log_history[-1]["train_loss"] is not None
 
     def test_generation_config_init(self):
-        training_args = GKDConfig(output_dir=self.tmp_dir)
+        training_args = GKDConfig(output_dir=self.tmp_dir, bf16=False, gradient_checkpointing=True)
         dummy_dataset = load_dataset("trl-internal-testing/zen", "conversational_language_modeling")
 
         trainer = GKDTrainer(
@@ -280,3 +280,4 @@ class TestGKDTrainer(TrlTestCase):
         assert trainer.generation_config.max_new_tokens == training_args.max_new_tokens
         assert trainer.generation_config.temperature == training_args.temperature
         assert trainer.generation_config.top_k == 0
+        assert trainer.generation_config.use_cache is True
